@@ -1,7 +1,8 @@
 """CLI генерации Excel-отчётов по ТЗ.
 
-Создаёт все 10 форм: 5 направлений × дневная/недельная форма.
-Опционально отправляет созданные файлы в чат Bitrix24.
+Создаёт один Excel-файл на базе шаблона: каждый отчёт заполняется на своём
+листе, как в `templates/report_template.xlsx`.
+Опционально отправляет созданный файл в чат Bitrix24.
 """
 from __future__ import annotations
 
@@ -35,10 +36,6 @@ class GeneratedReport:
     kind: str
     name: str
     path: Path
-
-
-def _safe_name(name: str) -> str:
-    return name.replace(" ", "_").replace(".", "").replace("/", "_")
 
 
 def _parse_date(value: str) -> date:
@@ -80,39 +77,30 @@ def combine_wash(name: str, a: WashMetrics, b: WashMetrics) -> WashMetrics:
     return result
 
 
-def generate_daily(service: MetricsService, reporter: ExcelReporter, day: date) -> list[GeneratedReport]:
-    reports: list[GeneratedReport] = []
-
+def fill_daily_sheets(service: MetricsService, reporter: ExcelReporter, wb, day: date) -> None:
     for name in SERVICE_REPORTS:
         metrics = service.daily(name, day)
-        out = OUTPUT_DIR / f"{_safe_name(name)}_{day.isoformat()}.xlsx"
-        reports.append(GeneratedReport("daily", name, reporter.fill_daily(name, day, metrics, out)))
+        reporter.fill_daily_in_workbook(wb, name, day, metrics)
 
     stroit = service.daily_wash(WASH_STROIT, day)
     ulyan = service.daily_wash(WASH_ULYAN, day)
-    out = OUTPUT_DIR / f"wash_daily_{day.isoformat()}.xlsx"
-    reports.append(GeneratedReport("daily", "Мойки", reporter.fill_daily_wash(day, stroit, ulyan, out)))
+    reporter.fill_daily_wash_in_workbook(wb, day, stroit, ulyan)
 
     for name in SHOP_REPORTS:
         metrics = service.daily_shop(name, day)
-        out = OUTPUT_DIR / f"shop_{name}_{day.isoformat()}.xlsx"
-        reports.append(GeneratedReport("daily", name, reporter.fill_daily_shop(name, metrics, out)))
-
-    return reports
+        reporter.fill_daily_shop_in_workbook(wb, name, metrics)
 
 
-def generate_weekly(
+def fill_weekly_sheets(
     service: MetricsService,
     reporter: ExcelReporter,
+    wb,
     any_date: date,
-) -> list[GeneratedReport]:
-    reports: list[GeneratedReport] = []
-
+) -> None:
     for name in SERVICE_REPORTS:
         weekly = service.weekly(name, any_date)
         days = service.week_daily_breakdown(name, any_date)
-        out = OUTPUT_DIR / f"weekly_{name}_{weekly.week_start.isoformat()}.xlsx"
-        reports.append(GeneratedReport("weekly", name, reporter.fill_weekly(name, weekly, days, out)))
+        reporter.fill_weekly_in_workbook(wb, name, weekly, days)
 
     stroit = service.weekly_wash(WASH_STROIT, any_date)
     ulyan = service.weekly_wash(WASH_ULYAN, any_date)
@@ -122,24 +110,45 @@ def generate_weekly(
     day_combined = [
         combine_wash("Мойки", a, b) for a, b in zip(days_stroit, days_ulyan)
     ]
-    out = OUTPUT_DIR / f"wash_weekly_{combined.period_start.isoformat()}.xlsx"
-    reports.append(
-        GeneratedReport(
-            "weekly",
-            "Мойки",
-            reporter.fill_weekly_wash(any_date, combined, day_combined, out),
-        )
-    )
+    reporter.fill_weekly_wash_in_workbook(wb, combined, day_combined)
 
     for name in SHOP_REPORTS:
         weekly = service.weekly_shop(name, any_date)
         days = service.week_shop_daily_breakdown(name, any_date)
-        out = OUTPUT_DIR / f"shop_weekly_{name}_{weekly.week_start.isoformat()}.xlsx"
-        reports.append(
-            GeneratedReport("weekly", name, reporter.fill_weekly_shop(name, weekly, days, out))
-        )
+        reporter.fill_weekly_shop_in_workbook(wb, name, weekly, days)
 
-    return reports
+
+def _weekly_start(service: MetricsService, any_date: date) -> date:
+    start, _ = service._week_bounds(any_date)
+    return start
+
+
+def _bundle_path(mode: str, service: MetricsService, daily_day: date, weekly_day: date) -> Path:
+    if mode == "daily":
+        return OUTPUT_DIR / f"reports_daily_{daily_day.isoformat()}.xlsx"
+    if mode == "weekly":
+        return OUTPUT_DIR / f"reports_weekly_{_weekly_start(service, weekly_day).isoformat()}.xlsx"
+    return OUTPUT_DIR / (
+        f"reports_all_daily_{daily_day.isoformat()}_"
+        f"weekly_{_weekly_start(service, weekly_day).isoformat()}.xlsx"
+    )
+
+
+def generate_workbook(
+    service: MetricsService,
+    reporter: ExcelReporter,
+    mode: str,
+    daily_day: date,
+    weekly_day: date,
+) -> list[GeneratedReport]:
+    wb = reporter.new_workbook()
+    if mode in ("daily", "all"):
+        fill_daily_sheets(service, reporter, wb, daily_day)
+    if mode in ("weekly", "all"):
+        fill_weekly_sheets(service, reporter, wb, weekly_day)
+
+    out = reporter.save_workbook(wb, _bundle_path(mode, service, daily_day, weekly_day))
+    return [GeneratedReport(mode, "Все отчёты", out)]
 
 
 def send_to_bitrix(reports: list[GeneratedReport], title: str) -> None:
@@ -164,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--send-bitrix",
         action="store_true",
-        help="отправить созданные файлы в чат Bitrix24",
+        help="отправить созданный файл в чат Bitrix24",
     )
     return parser
 
@@ -178,11 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         service = MetricsService()
         reporter = ExcelReporter()
-        generated: list[GeneratedReport] = []
-        if args.mode in ("daily", "all"):
-            generated.extend(generate_daily(service, reporter, daily_day))
-        if args.mode in ("weekly", "all"):
-            generated.extend(generate_weekly(service, reporter, weekly_day))
+        generated = generate_workbook(service, reporter, args.mode, daily_day, weekly_day)
     except ODataUnavailableError as exc:
         print(f"OData недоступен: {exc}", file=sys.stderr)
         return 2
@@ -195,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.send_bitrix:
         try:
-            send_to_bitrix(generated, "Отчёты АТЦ: созданные Excel-файлы")
+            send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
             print("[OK] Отправлено в Bitrix24")
         except BitrixError as exc:
             print(f"Ошибка Bitrix24: {exc}", file=sys.stderr)

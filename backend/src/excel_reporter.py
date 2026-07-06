@@ -475,3 +475,196 @@ def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_
 
 ExcelReporter.fill_daily_shop = fill_daily_shop
 ExcelReporter.fill_weekly_shop = fill_weekly_shop
+
+
+# ============================================================ ЕДИНЫЙ ФАЙЛ
+# Эти методы заполняют уже открытую книгу. Старые fill_* методы оставлены для
+# smoke-тестов и точечной генерации, но основной CLI теперь сохраняет один xlsx
+# с отдельными листами, как в исходном шаблоне.
+def new_workbook(self):
+    return load_workbook(self.template_path, keep_vba=False, data_only=False)
+
+
+def save_workbook(self, wb, out_path) -> Path:
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out)
+    return out
+
+
+def fill_daily_in_workbook(self, wb, report_name: str, day: date, metrics: DailyMetrics) -> None:
+    sheet_name = REPORT_TO_SHEET.get(report_name)
+    if not sheet_name or sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист дневного отчёта '{report_name}' не найден")
+    ws = wb[sheet_name]
+
+    ws["C3"] = report_name
+    ws["C4"] = day.strftime("%d.%m.%Y")
+    self._write(ws, "D8", self._num(metrics.normhours.plan))
+    self._write(ws, "F8", self._num(metrics.normhours.fact))
+    self._write(ws, "D9", self._num(metrics.output_per_master.plan))
+    self._write(ws, "F9", self._num(metrics.output_per_master.fact))
+    self._write(ws, "D10", self._num(metrics.closed_orders.plan))
+    self._write(ws, "F10", self._num(metrics.closed_orders.fact))
+    self._write(ws, "D14", self._num(metrics.revenue.plan))
+    self._write(ws, "F14", self._num(metrics.revenue.fact))
+    self._write(ws, "D15", self._num(metrics.cost.plan))
+    self._write(ws, "F15", self._num(metrics.cost.fact))
+    self._write(ws, "D19", self._num(metrics.markup_pct.plan))
+    self._write(ws, "F19", self._num(metrics.markup_pct.fact))
+    self._write(ws, "D23", self._num(metrics.unclosed_over_1day.fact))
+    ws["D24"] = DASH
+
+
+def fill_weekly_in_workbook(self, wb, report_name: str, weekly_metrics, day_metrics: list) -> None:
+    sheet_name = REPORT_TO_WEEKLY_SHEET.get(report_name)
+    if not sheet_name or sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист недельного отчёта '{report_name}' не найден")
+    ws = wb[sheet_name]
+    w = weekly_metrics
+
+    ws["C3"] = report_name
+    ws["C4"] = f"{w.week_start.strftime('%d.%m')}–{w.week_end.strftime('%d.%m.%Y')}"
+    ws["C5"] = ""
+    self._write(ws, "D9", self._num(w.normhours.plan))
+    self._write(ws, "F9", self._num(w.normhours.fact))
+    self._write(ws, "D10", self._num(w.output_per_master.plan))
+    self._write(ws, "F10", self._num(w.output_per_master.fact))
+    self._write(ws, "D11", self._num(w.closed_orders.plan))
+    self._write(ws, "F11", self._num(w.closed_orders.fact))
+    self._write(ws, "D15", self._num(w.revenue.plan))
+    self._write(ws, "F15", self._num(w.revenue.fact))
+    self._write(ws, "D16", self._num(w.cost.plan))
+    self._write(ws, "F16", self._num(w.cost.fact))
+    self._write(ws, "D20", self._num(w.markup_pct.plan))
+    self._write(ws, "F20", self._num(w.markup_pct.fact))
+
+    for i in range(7):
+        row = 24 + i
+        dm = day_metrics[i]
+        self._write(ws, f"D{row}", self._num(dm.revenue.fact))
+        self._write(ws, f"F{row}", self._num(dm.normhours.fact))
+        self._write(ws, f"H{row}", self._num(dm.closed_orders.fact))
+
+
+def fill_daily_wash_in_workbook(self, wb, day, m_stroit, m_ulyan) -> None:
+    if WASH_DAILY_SHEET not in wb.sheetnames:
+        raise ValueError(f"Лист '{WASH_DAILY_SHEET}' не найден")
+    ws = wb[WASH_DAILY_SHEET]
+
+    ws["C3"] = "Мойки"
+    ws["C4"] = day.strftime("%d.%m.%Y")
+    self._write(ws, "D8", self._num(m_stroit.cars.plan))
+    self._write(ws, "F8", self._num(m_stroit.cars.fact))
+    self._write(ws, "D9", self._num(m_stroit.revenue.plan))
+    self._write(ws, "F9", self._num(m_stroit.revenue.fact))
+    self._write(ws, "D14", self._num(m_ulyan.cars.plan))
+    self._write(ws, "F14", self._num(m_ulyan.cars.fact))
+    self._write(ws, "D15", self._num(m_ulyan.revenue.plan))
+    self._write(ws, "F15", self._num(m_ulyan.revenue.fact))
+
+
+def fill_weekly_wash_in_workbook(self, wb, combined_weekly, day_breakdown) -> None:
+    if WASH_WEEKLY_SHEET not in wb.sheetnames:
+        raise ValueError(f"Лист '{WASH_WEEKLY_SHEET}' не найден")
+    ws = wb[WASH_WEEKLY_SHEET]
+    cw = combined_weekly
+
+    ws["C3"] = "Мойки"
+    ws["C4"] = f"{cw.period_start.strftime('%d.%m')}–{cw.period_end.strftime('%d.%m.%Y')}"
+    ws["C5"] = ""
+    self._write(ws, "D9", self._num(cw.cars.plan))
+    self._write(ws, "F9", self._num(cw.cars.fact))
+    self._write(ws, "D10", self._num(cw.revenue.plan))
+    self._write(ws, "F10", self._num(cw.revenue.fact))
+    for i in range(7):
+        row = 15 + i
+        dm = day_breakdown[i]
+        self._write(ws, f"D{row}", self._num(dm.cars.fact))
+        self._write(ws, f"F{row}", self._num(dm.revenue.fact))
+        operators = getattr(dm, "executors_count", 0)
+        self._write(ws, f"I{row}", self._num(operators) if operators else None)
+
+
+def fill_daily_shop_in_workbook(self, wb, report_name: str, shop_metrics) -> None:
+    sheet_name = SHOP_DAILY_SHEET.get(report_name)
+    cmap = SHOP_CELL_MAP.get(report_name)
+    if not sheet_name or sheet_name not in wb.sheetnames or not cmap:
+        raise ValueError(f"Лист дневного отчёта '{report_name}' не найден")
+    ws = wb[sheet_name]
+    m = shop_metrics
+
+    ws["C3"] = report_name
+    ws["C4"] = m.day.strftime("%d.%m.%Y")
+    d, f = cmap["normhours"]
+    self._write(ws, d, self._num(m.normhours.plan))
+    self._write(ws, f, self._num(m.normhours.fact))
+    d, f = cmap["output"]
+    self._write(ws, d, self._num(m.output_per_master.plan))
+    self._write(ws, f, self._num(m.output_per_master.fact))
+    if cmap.get("output_cost"):
+        d, f = cmap["output_cost"]
+        self._write(ws, d, self._num(m.output_cost.plan))
+        self._write(ws, f, self._num(m.output_cost.fact))
+    self._write(ws, cmap["active"], self._num(m.active))
+    self._write(ws, cmap["ready_today"], self._num(m.ready_today))
+    self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))
+    self._write(ws, cmap["overdue"], self._num(m.overdue))
+    self._write(ws, cmap["planned_close_week"], self._num(m.planned_close_week))
+    d, f = cmap["closed"]
+    self._write(ws, d, self._num(m.closed_orders.plan))
+    self._write(ws, f, self._num(m.closed_orders.fact))
+    d, f = cmap["revenue"]
+    self._write(ws, d, self._num(m.revenue_closed.plan))
+    self._write(ws, f, self._num(m.revenue_closed.fact))
+    self._write(ws, cmap["payments_plan"], self._num(m.payments.plan))
+    self._write(ws, cmap["payments_fact"], self._num(m.payments.fact))
+    self._write(ws, cmap["insurance_count_fact"], self._num(m.insurance_count.fact))
+    self._write(ws, cmap["insurance_sum_fact"], self._num(m.insurance_sum.fact))
+
+
+def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day_breakdown) -> None:
+    sheet_name = SHOP_WEEKLY_SHEET.get(report_name)
+    cmap = SHOP_WEEKLY_CELL_MAP.get(report_name)
+    if not sheet_name or sheet_name not in wb.sheetnames or not cmap:
+        raise ValueError(f"Лист недельного отчёта '{report_name}' не найден")
+    ws = wb[sheet_name]
+    m = weekly_metrics
+
+    ws["C3"] = report_name
+    ws["C4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
+    ws["C5"] = ""
+    d, f = cmap["normhours"]
+    self._write(ws, d, self._num(m.normhours.plan))
+    self._write(ws, f, self._num(m.normhours.fact))
+    d, f = cmap["output"]
+    self._write(ws, d, self._num(m.output_per_master.plan))
+    self._write(ws, f, self._num(m.output_per_master.fact))
+    self._write(ws, cmap["active"], self._num(m.active))
+    self._write(ws, cmap["closed"], self._num(m.closed_orders.fact))
+    self._write(ws, cmap["revenue"], self._num(m.revenue_closed.fact))
+    self._write(ws, cmap["margin_pct"], self._num(m.margin_pct.fact))
+    self._write(ws, cmap["avg_duration"], self._num(m.avg_duration_days.fact))
+    self._write(ws, cmap["overdue"], self._num(m.overdue))
+    self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))
+    self._write(ws, cmap["payments"], self._num(m.payments.fact))
+    if cmap.get("insurance_count"):
+        self._write(ws, cmap["insurance_count"], self._num(m.insurance_count.fact))
+    if cmap.get("insurance_sum"):
+        self._write(ws, cmap["insurance_sum"], self._num(m.insurance_sum.fact))
+    for i in range(7):
+        row = cmap["daily_start"] + i
+        dm = day_breakdown[i]
+        self._write(ws, f"D{row}", self._num(dm.normhours.fact))
+        self._write(ws, f"F{row}", self._num(_shop_masters(dm)))
+        self._write(ws, f"I{row}", None)
+
+
+ExcelReporter.new_workbook = new_workbook
+ExcelReporter.save_workbook = save_workbook
+ExcelReporter.fill_daily_in_workbook = fill_daily_in_workbook
+ExcelReporter.fill_weekly_in_workbook = fill_weekly_in_workbook
+ExcelReporter.fill_daily_wash_in_workbook = fill_daily_wash_in_workbook
+ExcelReporter.fill_weekly_wash_in_workbook = fill_weekly_wash_in_workbook
+ExcelReporter.fill_daily_shop_in_workbook = fill_daily_shop_in_workbook
+ExcelReporter.fill_weekly_shop_in_workbook = fill_weekly_shop_in_workbook

@@ -80,8 +80,8 @@ Next steps:
 1. Edit $BACKEND_DIR/.env
 2. Test OData:
    cd $BACKEND_DIR && ./venv/bin/python src/smoke_test.py
-3. Generate all reports:
+3. Generate one workbook with all report sheets:
    cd $BACKEND_DIR/src && ../venv/bin/python generate_reports.py --mode all --date YYYY-MM-DD
-4. Generate and send to Bitrix24:
+4. Generate one workbook and send it to Bitrix24:
    cd $BACKEND_DIR/src && ../venv/bin/python generate_reports.py --mode all --send-bitrix
 EOF

@@ -316,8 +316,8 @@ SHOP_CELL_MAP: dict[str, dict] = {
 def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     """Заполняет дневной лист длинного ремонта («Шаркер (Д)» или «ЦКР (Д)»).
 
-    Пишет ПЛАН/ФАКТ выработки, пайплайн (колонка D), финансы. BLOCKED-показатели
-    (нормочасы/выработка ФАКТ, стоимость выработки, страховые ЗН) выводятся «—».
+    Пишет ПЛАН/ФАКТ выработки, пайплайн (колонка D), финансы. Показатели без
+    подтверждённого источника (стоимость выработки, страховые ЗН) выводятся «—».
     Колонку H (формулы %) НЕ трогает.
     """
     sheet_name = SHOP_DAILY_SHEET.get(report_name)
@@ -375,5 +375,103 @@ def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     return out
 
 
-ExcelReporter.fill_daily_shop = fill_daily_shop
+SHOP_WEEKLY_SHEET: dict[str, str] = {
+    "Шаркер": "Шаркер (Н)",
+    "ЦКР": "ЦКР (Н)",
+}
 
+SHOP_WEEKLY_CELL_MAP: dict[str, dict] = {
+    "Шаркер": {
+        "normhours": ("D9", "F9"),
+        "output": ("D10", "F10"),
+        "active": "D14",
+        "closed": "D15",
+        "revenue": "D16",
+        "margin_pct": "D17",
+        "avg_duration": "D18",
+        "overdue": "D19",
+        "awaiting_parts": "D20",
+        "payments": "D21",
+        "insurance_count": "D22",
+        "insurance_sum": "D23",
+        "daily_start": 27,
+    },
+    "ЦКР": {
+        "normhours": ("D9", "F9"),
+        "output": ("D10", "F10"),
+        "active": "D14",
+        "closed": "D15",
+        "revenue": "D16",
+        "margin_pct": "D17",
+        "avg_duration": "D18",
+        "overdue": "D19",
+        "awaiting_parts": "D20",
+        "payments": "D21",
+        "insurance_count": None,
+        "insurance_sum": None,
+        "daily_start": 25,
+    },
+}
+
+
+def _shop_masters(metric) -> Optional[float]:
+    normhours = getattr(metric.normhours, "fact", None)
+    output = getattr(metric.output_per_master, "fact", None)
+    if normhours is None or not output:
+        return None
+    return normhours / output
+
+
+def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_path):
+    """Заполняет недельный лист длинного ремонта («Шаркер (Н)» или «ЦКР (Н)»)."""
+    sheet_name = SHOP_WEEKLY_SHEET.get(report_name)
+    cmap = SHOP_WEEKLY_CELL_MAP.get(report_name)
+    if not sheet_name or not cmap:
+        raise ValueError(f"Нет карты недельного листа для отчёта '{report_name}'")
+
+    wb = load_workbook(self.template_path, keep_vba=False, data_only=False)
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист '{sheet_name}' не найден в шаблоне")
+    ws = wb[sheet_name]
+    m = weekly_metrics
+
+    ws["C3"] = report_name
+    ws["C4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
+    ws["C5"] = ""
+
+    d, f = cmap["normhours"]
+    self._write(ws, d, self._num(m.normhours.plan))
+    self._write(ws, f, self._num(m.normhours.fact))
+    d, f = cmap["output"]
+    self._write(ws, d, self._num(m.output_per_master.plan))
+    self._write(ws, f, self._num(m.output_per_master.fact))
+
+    self._write(ws, cmap["active"], self._num(m.active))
+    self._write(ws, cmap["closed"], self._num(m.closed_orders.fact))
+    self._write(ws, cmap["revenue"], self._num(m.revenue_closed.fact))
+    self._write(ws, cmap["margin_pct"], self._num(m.margin_pct.fact))
+    self._write(ws, cmap["avg_duration"], self._num(m.avg_duration_days.fact))
+    self._write(ws, cmap["overdue"], self._num(m.overdue))
+    self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))
+    self._write(ws, cmap["payments"], self._num(m.payments.fact))
+    if cmap.get("insurance_count"):
+        self._write(ws, cmap["insurance_count"], self._num(m.insurance_count.fact))
+    if cmap.get("insurance_sum"):
+        self._write(ws, cmap["insurance_sum"], self._num(m.insurance_sum.fact))
+
+    start_row = cmap["daily_start"]
+    for i in range(7):
+        row = start_row + i
+        dm = day_breakdown[i]
+        self._write(ws, f"D{row}", self._num(dm.normhours.fact))
+        self._write(ws, f"F{row}", self._num(_shop_masters(dm)))
+        self._write(ws, f"I{row}", None)
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out)
+    return out
+
+
+ExcelReporter.fill_daily_shop = fill_daily_shop
+ExcelReporter.fill_weekly_shop = fill_weekly_shop

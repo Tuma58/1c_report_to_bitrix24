@@ -18,6 +18,7 @@ backend/.env.*
 
 # Generated reports and transient office files
 backend/output/
+backend/logs/
 ~$*
 ~$*.docx
 ~$*.xlsx

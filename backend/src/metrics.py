@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import calendar
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 try:
@@ -482,6 +482,62 @@ class ShopMetrics:
     insurance_sum: Metric = field(default_factory=lambda: Metric("Сумма страховых ЗН прошлых мес.", None))
 
 
+@dataclass
+class ShopWeeklyMetrics:
+    """Недельные показатели длинного ремонта (Шаркер / ЦКР)."""
+    report_name: str
+    week_start: date
+    week_end: date
+    division_key: Optional[str]
+
+    normhours: Metric = field(default_factory=lambda: Metric("Нормочасы за неделю", 0.0))
+    output_per_master: Metric = field(default_factory=lambda: Metric("Выработка на 1 мастера", 0.0))
+
+    active: int = 0
+    closed_orders: Metric = field(default_factory=lambda: Metric("Закрыто ЗН за неделю", 0.0))
+    revenue_closed: Metric = field(default_factory=lambda: Metric("Выручка закрытых ЗН", 0.0))
+    margin_pct: Metric = field(default_factory=lambda: Metric("Маржинальность закрытых ЗН, %", None))
+    avg_duration_days: Metric = field(default_factory=lambda: Metric("Ср. длительность ремонта, дней", None))
+    overdue: int = 0
+    awaiting_parts: int = 0
+    payments: Metric = field(default_factory=lambda: Metric("Поступления оплат за неделю", 0.0))
+    insurance_count: Metric = field(default_factory=lambda: Metric("Кол-во страховых ЗН прошлых мес.", None))
+    insurance_sum: Metric = field(default_factory=lambda: Metric("Сумма страховых ЗН прошлых мес.", None))
+
+
+def _parse_odata_date(value) -> Optional[datetime]:
+    """Разбирает наиболее частые ISO-строки дат из OData 1С."""
+    if not value or not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if raw.startswith("/Date("):
+        try:
+            millis = int(raw.split("(", 1)[1].split(")", 1)[0].split("+", 1)[0])
+            return datetime.fromtimestamp(millis / 1000)
+        except (ValueError, IndexError):
+            return None
+    raw = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            return datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return None
+
+
+def _average_repair_duration_days(closed_orders: list[dict]) -> Optional[float]:
+    durations: list[float] = []
+    for order in closed_orders:
+        start = _parse_odata_date(order.get("ДатаНачала"))
+        finish = _parse_odata_date(order.get("ДатаЗакрытия"))
+        if start and finish and finish >= start:
+            durations.append((finish - start).total_seconds() / 86400)
+    if not durations:
+        return None
+    return sum(durations) / len(durations)
+
+
 def daily_shop(self, report_name: str, day: date) -> ShopMetrics:
     """Дневной расчёт формы длинного ремонта (Шаркер / ЦКР) за день day.
 
@@ -504,10 +560,12 @@ def daily_shop(self, report_name: str, day: date) -> ShopMetrics:
     plan_closed = (plan_revenue / avg_check) if (plan_revenue is not None and avg_check) else None
 
     # ---- ВЫРАБОТКА ----
-    # ФАКТ нормочасов/выработки — BLOCKED: «мастер вводит вручную», в базе нет.
-    # TODO(BLOCKED normhours/output ФАКТ): источник данных отсутствует в OData.
-    result.normhours = Metric(result.normhours.name, None, plan_normhours)
-    result.output_per_master = Metric(result.output_per_master.name, None, plan_output_master)
+    # Для длинных ремонтов дневного регистра фактической выработки нет; по ТЗ
+    # используем документ плана и в ФАКТ, и в ПЛАН как подтверждённое правило.
+    result.normhours = Metric(result.normhours.name, plan_normhours, plan_normhours)
+    result.output_per_master = Metric(
+        result.output_per_master.name, plan_output_master, plan_output_master
+    )
     # Стоимость выработки (только ЦКР) — BLOCKED: формула не определена.
     # TODO(BLOCKED output_cost): согласовать формулу стоимости выработки.
     result.output_cost = Metric(result.output_cost.name, None, None)
@@ -539,5 +597,66 @@ def daily_shop(self, report_name: str, day: date) -> ShopMetrics:
     return result
 
 
-MetricsService.daily_shop = daily_shop
+def weekly_shop(self, report_name: str, any_date: date) -> ShopWeeklyMetrics:
+    """Недельный расчёт формы длинного ремонта (Шаркер / ЦКР)."""
+    start, end = self._week_bounds(any_date)
+    week_end_incl = end - timedelta(days=1)
+    division_key = self.references.division_key(report_name)
+    result = ShopWeeklyMetrics(
+        report_name=report_name,
+        week_start=start,
+        week_end=week_end_incl,
+        division_key=division_key,
+    )
+    if not division_key:
+        return result
 
+    monthly = self.plan.monthly_values(division_key, any_date)
+    plan_normhours = self._plan_week(monthly, "нормочасы", any_date)
+    plan_output_master = self._plan_week(monthly, "выработка_на_мастера", any_date)
+    plan_revenue = self._plan_week(monthly, "выручка", any_date)
+    avg_check_code = plan_code("средний_чек")
+    avg_check = monthly.get(avg_check_code) if avg_check_code else None
+    plan_closed = (plan_revenue / avg_check) if (plan_revenue is not None and avg_check) else None
+
+    # См. daily_shop(): для длинных ремонтов ФАКТ выработки берём из плана.
+    result.normhours = Metric(result.normhours.name, plan_normhours, plan_normhours)
+    result.output_per_master = Metric(
+        result.output_per_master.name, plan_output_master, plan_output_master
+    )
+
+    result.active = self.orders.pipeline_active(division_key, week_end_incl)
+    result.overdue = self.orders.pipeline_overdue(division_key, week_end_incl)
+    result.awaiting_parts = self.orders.pipeline_awaiting_parts(division_key, week_end_incl)
+
+    closed = self.orders.closed_orders_period(division_key, start, end)
+    result.closed_orders = Metric(result.closed_orders.name, float(len(closed)), plan_closed)
+
+    breakdown = self.income.revenue_breakdown_period(division_key, start, end)
+    revenue = breakdown["parts"] + breakdown["works"]
+    cost = breakdown["cost"]
+    margin_pct = ((revenue - cost) / revenue * 100.0) if revenue else None
+    result.revenue_closed = Metric(result.revenue_closed.name, revenue, plan_revenue)
+    result.margin_pct = Metric(result.margin_pct.name, margin_pct, None)
+    result.avg_duration_days = Metric(
+        result.avg_duration_days.name, _average_repair_duration_days(closed), None
+    )
+
+    payments = self.payments.payments_period(division_key, start, end)
+    result.payments = Metric(result.payments.name, payments, None)
+
+    # Остаётся заблокировано до появления в OData даты вручения/связи страховых ЗН.
+    result.insurance_count = Metric(result.insurance_count.name, None, None)
+    result.insurance_sum = Metric(result.insurance_sum.name, None, None)
+    return result
+
+
+def week_shop_daily_breakdown(self, report_name: str, any_date: date) -> list[ShopMetrics]:
+    """Разбивка длинного ремонта по дням ISO-недели."""
+    start, _ = self._week_bounds(any_date)
+    return [self.daily_shop(report_name, start + timedelta(days=i)) for i in range(7)]
+
+
+MetricsService.daily_shop = daily_shop
+MetricsService.weekly_shop = weekly_shop
+MetricsService.week_shop_daily_breakdown = week_shop_daily_breakdown

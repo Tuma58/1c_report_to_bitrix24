@@ -25,6 +25,29 @@ Python-бэкенд для отчётов АТЦ из 1С OData. Проект ч
 
 ## Установка
 
+На чистом Debian 12 после клонирования репозитория:
+
+```bash
+./setup.sh
+```
+
+Скрипт установит системные зависимости через `apt`, создаст `backend/venv`,
+установит Python-пакеты, подготовит `backend/.env` из `.env.example` и проверит
+компиляцию модулей.
+
+Для установки cron-задач:
+
+```bash
+INSTALL_CRON=1 ./setup.sh
+```
+
+Задачи cron:
+- ежедневно в 11:00 — дневные отчёты за вчера;
+- по пятницам в 11:00 — недельные отчёты за предыдущую неделю;
+- обе задачи отправляют созданные файлы в Bitrix24, если заполнены `BITRIX_*`.
+
+Ручная установка для разработки:
+
 ```bash
 cd backend
 python3 -m venv venv
@@ -42,6 +65,9 @@ ODATA_LOGIN=...
 ODATA_PASSWORD=...
 ODATA_TIMEOUT=30
 ODATA_RETRIES=3
+BITRIX_WEBHOOK_URL=
+BITRIX_CHAT_ID=
+BITRIX_DISK_FOLDER_ID=
 ```
 
 `backend/.env` не должен попадать в git. Корневой `.gitignore` и
@@ -79,6 +105,32 @@ cd backend
 Эти проверки ходят в живую 1С и могут завершиться кодом `2`, если OData
 недоступен из-за сети, таймаута или IP-allowlist.
 
+Создать все 10 Excel-форм из ТЗ (5 направлений × дневная/недельная):
+
+```bash
+cd backend/src
+../venv/bin/python generate_reports.py --mode all --date 2026-07-01
+```
+
+Создать отчёты и отправить их в Bitrix24:
+
+```bash
+cd backend/src
+../venv/bin/python generate_reports.py --mode all --send-bitrix
+```
+
+## Bitrix24
+
+Отправка использует входящий REST webhook:
+
+- `BITRIX_WEBHOOK_URL` — URL вида `https://portal.bitrix24.ru/rest/<user>/<token>/`;
+- `BITRIX_CHAT_ID` — диалог/чат, например `chat123`;
+- `BITRIX_DISK_FOLDER_ID` — ID папки Диска Bitrix24 для загрузки `.xlsx`.
+
+Файлы загружаются в указанную папку Диска, затем в чат отправляется сообщение
+со ссылками на созданные таблицы. Без `BITRIX_DISK_FOLDER_ID` отправка файлов
+завершится ошибкой, чтобы не имитировать успешную доставку.
+
 ## Структура
 
 ```text
@@ -94,6 +146,8 @@ backend/
     repositories.py    чтение заказ-нарядов, регистров, планов, оплат
     metrics.py         расчёт дневных/недельных/спец. метрик
     excel_reporter.py  заполнение Excel-шаблона
+    bitrix_sender.py   отправка ссылок на xlsx в чат Bitrix24
+    generate_reports.py единый CLI создания всех форм
     consolidated.py    сводные таблицы
     smoke_test.py      проверка подключения
   templates/

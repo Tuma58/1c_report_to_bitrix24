@@ -82,7 +82,10 @@ class OrderRepository:
             "Document_ЗаказНаряд",
             params=build_params(
                 filter=f,
-                select="Ref_Key,Number,Date,ДатаЗакрытия,СуммаДокумента,Состояние_Key,ПодразделениеКомпании_Key",
+                select=(
+                    "Ref_Key,Number,Date,ДатаНачала,ДатаЗакрытия,СуммаДокумента,"
+                    "Состояние_Key,ПодразделениеКомпании_Key"
+                ),
             ),
         )
 
@@ -446,4 +449,3 @@ class PaymentRepository:
     def payments_day(self, division_key: str, day: date) -> float:
         """Сумма оплат за день — период [day, day+1)."""
         return self.payments_period(division_key, day, day + timedelta(days=1))
-

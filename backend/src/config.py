@@ -29,6 +29,9 @@ class Settings:
     odata_password: str
     timeout: int
     retries: int
+    bitrix_webhook_url: str
+    bitrix_chat_id: str
+    bitrix_disk_folder_id: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -41,6 +44,9 @@ class Settings:
             odata_password=os.getenv("ODATA_PASSWORD", ""),
             timeout=_get_int("ODATA_TIMEOUT", 30),
             retries=_get_int("ODATA_RETRIES", 3),
+            bitrix_webhook_url=os.getenv("BITRIX_WEBHOOK_URL", "").strip(),
+            bitrix_chat_id=os.getenv("BITRIX_CHAT_ID", "").strip(),
+            bitrix_disk_folder_id=os.getenv("BITRIX_DISK_FOLDER_ID", "").strip(),
         )
 
 

@@ -23,6 +23,10 @@ backend/logs/
 ~$*.docx
 ~$*.xlsx
 
-# Local tool state
+# Local tools, notes and generated project docs
 .claude/
 .mcp.json
+CLAUDE.md
+1c_web_server.txt
+gen_docx.py
+ТЗ_Отчёты_АТЦ.docx

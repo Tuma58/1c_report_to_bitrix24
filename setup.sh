@@ -131,7 +131,7 @@ EOF_SERVICE
 
 echo "[1/8] Installing system packages"
 $SUDO apt-get update
-$SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y \
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
   cron \
   curl \

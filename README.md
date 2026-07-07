@@ -7,10 +7,10 @@
 Выполните на чистом VPS под `root`:
 
 ```bash
-bash -lc 'set -e; apt-get update && apt-get install -y git ca-certificates && git clone https://github.com/Tuma58/1c_report_to_bitrix24.git /opt/1c_report && cd /opt/1c_report && ./setup.sh'
+bash -lc 'set -e; apt-get update && apt-get install -y git ca-certificates; if [ -d /opt/1c_report/.git ]; then cd /opt/1c_report && git pull --ff-only; else git clone https://github.com/Tuma58/1c_report_to_bitrix24.git /opt/1c_report && cd /opt/1c_report; fi; ./setup.sh'
 ```
 
-Скрипт установит системные пакеты, создаст Python-окружение, поставит зависимости, создаст `backend/.env`, проверит Python-модули и развернёт web-интерфейс как systemd-сервис `1c-report-web`.
+Команда подходит и для первой установки, и для повторного запуска после обновления репозитория. Скрипт установит системные пакеты, создаст Python-окружение, поставит зависимости, создаст `backend/.env`, проверит Python-модули и развернёт web-интерфейс как systemd-сервис `1c-report-web`.
 
 Web-интерфейс по умолчанию работает на порту `8080` и не занимает порты `80` и `443`.
 

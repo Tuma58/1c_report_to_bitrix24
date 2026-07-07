@@ -280,7 +280,7 @@ SHOP_DAILY_SHEET: dict[str, str] = {
 # Для каждого отчёта — координаты по разделам.
 SHOP_CELL_MAP: dict[str, dict] = {
     "Шаркер": {
-        "normhours": ("D8", "F8"),      # план / факт(BLOCKED -> —)
+        "normhours": ("D8", "F8"),      # план / факт из 1С
         "output": ("D9", "F9"),
         "output_cost": None,            # у Шаркера нет строки «Стоимость выработки»
         "active": "D13",
@@ -339,10 +339,10 @@ def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     # ---- ВЫРАБОТКА (план / факт) ----
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
-    self._write(ws, f, self._num(m.normhours.fact))   # BLOCKED -> None -> «—»
+    self._write(ws, f, self._num(m.normhours.fact))
     d, f = cmap["output"]
     self._write(ws, d, self._num(m.output_per_master.plan))
-    self._write(ws, f, self._num(m.output_per_master.fact))  # BLOCKED -> «—»
+    self._write(ws, f, self._num(m.output_per_master.fact))
     if cmap.get("output_cost"):  # только ЦКР — стоимость выработки BLOCKED (обе «—»)
         d, f = cmap["output_cost"]
         self._write(ws, d, self._num(m.output_cost.plan))

@@ -15,6 +15,7 @@ Python-бэкенд для отчётов АТЦ из 1С OData. Проект ч
 - Дневные формы `Шаркер` и `ЦКР` с помеченными заблокированными показателями,
   для которых в OData нет подтверждённого источника.
 - Сводная дневная/недельная таблица по организациям.
+- Web-интерфейс настройки и запуска отчётов.
 - Проверки заполнения Excel-файлов и сохранности формульных ячеек.
 
 ## Требования
@@ -32,8 +33,20 @@ Python-бэкенд для отчётов АТЦ из 1С OData. Проект ч
 ```
 
 Скрипт установит системные зависимости через `apt`, создаст `backend/venv`,
-установит Python-пакеты, подготовит `backend/.env` из `.env.example` и проверит
-компиляцию модулей.
+установит Python-пакеты, подготовит `backend/.env` из `.env.example`, проверит
+компиляцию модулей и развернёт web-интерфейс как systemd-сервис
+`1c-report-web`.
+
+Web-интерфейс по умолчанию слушает порт `8080`. Приложение не занимает порты
+`80` и `443`; если в `.env` случайно указан `WEB_UI_PORT=80` или `443`,
+`setup.sh` заменит порт на `8080`, а `web_app.py` откажется стартовать на этих
+портах.
+
+Чтобы пропустить установку web-сервиса:
+
+```bash
+INSTALL_WEB=0 ./setup.sh
+```
 
 Для установки cron-задач:
 
@@ -68,6 +81,17 @@ ODATA_RETRIES=3
 BITRIX_WEBHOOK_URL=
 BITRIX_CHAT_ID=
 BITRIX_DISK_FOLDER_ID=
+WEB_UI_HOST=0.0.0.0
+WEB_UI_PORT=8080
+WEB_UI_USER=admin
+WEB_UI_PASSWORD=
+```
+
+Если `WEB_UI_PASSWORD` пустой, `setup.sh` автоматически сгенерирует пароль и
+сохранит его в `backend/.env`. Посмотреть пароль на сервере:
+
+```bash
+grep '^WEB_UI_PASSWORD=' backend/.env
 ```
 
 `backend/.env` не должен попадать в git. Корневой `.gitignore` и
@@ -119,6 +143,61 @@ cd backend/src
 ../venv/bin/python generate_reports.py --mode all --send-bitrix
 ```
 
+Запустить web-интерфейс настройки отчёта вручную:
+
+```bash
+cd backend
+./venv/bin/python src/web_app.py
+```
+
+## Web-интерфейс на VPS
+
+После `./setup.sh` web-интерфейс развёрнут как systemd-сервис:
+
+```bash
+systemctl status 1c-report-web
+systemctl restart 1c-report-web
+journalctl -u 1c-report-web -f
+```
+
+Стандартная первичная настройка:
+
+```dotenv
+WEB_UI_HOST=0.0.0.0
+WEB_UI_PORT=8080
+WEB_UI_USER=admin
+WEB_UI_PASSWORD=<сгенерировано setup.sh>
+```
+
+Адрес для прямого доступа:
+
+```text
+http://<ip-vps>:8080/
+```
+
+Порт `8080` нужно открыть в firewall VPS или панели облачного провайдера, если
+доступ должен быть извне. Порты `80` и `443` приложение не использует.
+
+Для закрытой схемы через reverse proxy можно поменять:
+
+```dotenv
+WEB_UI_HOST=127.0.0.1
+WEB_UI_PORT=8080
+```
+
+После изменения `backend/.env` перезапустите сервис:
+
+```bash
+systemctl restart 1c-report-web
+```
+
+В интерфейсе доступны:
+- выбор режима отчёта: `Все листы`, `День`, `Неделя`;
+- выбор даты;
+- опциональная отправка файла в Bitrix24;
+- список последних `.xlsx`;
+- скачивание сформированного файла.
+
 ## Bitrix24
 
 Отправка использует входящий REST webhook:
@@ -148,6 +227,7 @@ backend/
     excel_reporter.py  заполнение Excel-шаблона
     bitrix_sender.py   отправка ссылок на xlsx в чат Bitrix24
     generate_reports.py единый CLI создания всех форм
+    web_app.py          web-интерфейс настройки отчёта
     consolidated.py    сводные таблицы
     smoke_test.py      проверка подключения
   templates/

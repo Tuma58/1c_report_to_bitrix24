@@ -349,6 +349,9 @@ class PlanRepository:
     def __init__(self, client: ODataClient, references: References) -> None:
         self.client = client
         self.references = references
+        self._month_docs_cache: dict[tuple[str, date], list[dict]] = {}
+        self._day_docs_cache: dict[tuple[str, date], list[dict]] = {}
+        self._indicator_values_cache: dict[str, dict[str, float]] = {}
 
     def _month_bounds(self, day: date) -> tuple[date, date]:
         start = day.replace(day=1)
@@ -358,8 +361,11 @@ class PlanRepository:
             nxt = start.replace(month=start.month + 1)
         return start, nxt
 
-    def latest_document(self, division_key: str, day: date) -> Optional[dict]:
-        """Последний по Date документ плана подразделения, чей ДатаФиксации в месяце дня."""
+    def documents_month(self, division_key: str, day: date) -> list[dict]:
+        """Документы подразделения с ДатаФиксации в месяце day, новые первыми."""
+        cache_key = (division_key, day.replace(day=1))
+        if cache_key in self._month_docs_cache:
+            return self._month_docs_cache[cache_key]
         start, nxt = self._month_bounds(day)
         f = (
             f"ПодразделениеКомпании_Key eq guid'{division_key}' "
@@ -371,13 +377,40 @@ class PlanRepository:
                 filter=f,
                 select="Ref_Key,Date,ДатаФиксации,ПодразделениеКомпании_Key",
                 orderby="Date desc",
-                top=1,
             ),
         )
+        self._month_docs_cache[cache_key] = rows
+        return rows
+
+    def documents_day(self, division_key: str, day: date) -> list[dict]:
+        """Документы подразделения с ДатаФиксации ровно в день day, новые первыми."""
+        cache_key = (division_key, day)
+        if cache_key in self._day_docs_cache:
+            return self._day_docs_cache[cache_key]
+        f = (
+            f"ПодразделениеКомпании_Key eq guid'{division_key}' "
+            f"and ДатаФиксации ge {_dt(day)} and ДатаФиксации lt {_dt(day + timedelta(days=1))}"
+        )
+        rows = self.client.get(
+            self.DOC,
+            params=build_params(
+                filter=f,
+                select="Ref_Key,Date,ДатаФиксации,ПодразделениеКомпании_Key",
+                orderby="Date desc",
+            ),
+        )
+        self._day_docs_cache[cache_key] = rows
+        return rows
+
+    def latest_document(self, division_key: str, day: date) -> Optional[dict]:
+        """Последний по Date документ подразделения, чей ДатаФиксации в месяце дня."""
+        rows = self.documents_month(division_key, day)
         return rows[0] if rows else None
 
     def indicator_values(self, doc_key: str) -> dict[str, float]:
         """Code показателя -> ЗначениеПоказателя для документа плана."""
+        if doc_key in self._indicator_values_cache:
+            return self._indicator_values_cache[doc_key]
         rows = self.client.get(
             self.ROWS,
             params=build_params(
@@ -392,14 +425,30 @@ class PlanRepository:
             code = code_by_ref.get(ref)
             if code:
                 result[code] = _num(r.get("ЗначениеПоказателя"))
+        self._indicator_values_cache[doc_key] = result
         return result
 
     def monthly_values(self, division_key: str, day: date) -> dict[str, float]:
-        """Code -> месячное плановое значение для подразделения/месяца (пусто, если нет документа)."""
-        doc = self.latest_document(division_key, day)
-        if not doc:
-            return {}
-        return self.indicator_values(doc["Ref_Key"])
+        """Code -> последнее значение за месяц по каждому показателю.
+
+        В 1С могут быть отдельные дневные документы факта с тем же месяцем
+        фиксации, но без строк месячного плана. Поэтому собираем значения
+        по всем документам месяца, новыми первыми: для каждого Code берётся
+        первая найденная строка.
+        """
+        result: dict[str, float] = {}
+        for doc in self.documents_month(division_key, day):
+            for code, value in self.indicator_values(doc["Ref_Key"]).items():
+                result.setdefault(code, value)
+        return result
+
+    def daily_values(self, division_key: str, day: date) -> dict[str, float]:
+        """Code -> последнее значение за конкретную ДатаФиксации day."""
+        result: dict[str, float] = {}
+        for doc in self.documents_day(division_key, day):
+            for code, value in self.indicator_values(doc["Ref_Key"]).items():
+                result.setdefault(code, value)
+        return result
 
 
 class PaymentRepository:

@@ -154,6 +154,17 @@ class MetricsService:
             return None
         return daily * 7.0
 
+    def _shop_daily_output_fact(
+        self, division_key: str, day: date
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Факт выработки длинного ремонта из дневного документа 1С."""
+        daily = self.plan.daily_values(division_key, day)
+        normhours_code = plan_code("факт_нормочасы")
+        output_code = plan_code("факт_выработка_на_мастера")
+        normhours = daily.get(normhours_code) if normhours_code else None
+        output_master = daily.get(output_code) if output_code else None
+        return normhours, output_master
+
     @staticmethod
     def _markup_pct_fact(parts: float, cost: float):
         """ФАКТ наценки на ЗЧ, % — формула «только запчасти» (parts-only).
@@ -560,11 +571,11 @@ def daily_shop(self, report_name: str, day: date) -> ShopMetrics:
     plan_closed = (plan_revenue / avg_check) if (plan_revenue is not None and avg_check) else None
 
     # ---- ВЫРАБОТКА ----
-    # Для длинных ремонтов дневного регистра фактической выработки нет; по ТЗ
-    # используем документ плана и в ФАКТ, и в ПЛАН как подтверждённое правило.
-    result.normhours = Metric(result.normhours.name, plan_normhours, plan_normhours)
+    # ПЛАН берём из месячных кодов 029/068, ФАКТ — из дневных кодов 072/073.
+    fact_normhours, fact_output_master = self._shop_daily_output_fact(division_key, day)
+    result.normhours = Metric(result.normhours.name, fact_normhours, plan_normhours)
     result.output_per_master = Metric(
-        result.output_per_master.name, plan_output_master, plan_output_master
+        result.output_per_master.name, fact_output_master, plan_output_master
     )
     # Стоимость выработки (только ЦКР) — BLOCKED: формула не определена.
     # TODO(BLOCKED output_cost): согласовать формулу стоимости выработки.
@@ -619,10 +630,20 @@ def weekly_shop(self, report_name: str, any_date: date) -> ShopWeeklyMetrics:
     avg_check = monthly.get(avg_check_code) if avg_check_code else None
     plan_closed = (plan_revenue / avg_check) if (plan_revenue is not None and avg_check) else None
 
-    # См. daily_shop(): для длинных ремонтов ФАКТ выработки берём из плана.
-    result.normhours = Metric(result.normhours.name, plan_normhours, plan_normhours)
+    daily_facts = [
+        self._shop_daily_output_fact(division_key, start + timedelta(days=i))
+        for i in range(7)
+    ]
+    fact_normhours_values = [normhours for normhours, _ in daily_facts if normhours is not None]
+    fact_output_values = [output for _, output in daily_facts if output is not None]
+    fact_normhours = sum(fact_normhours_values) if fact_normhours_values else None
+    fact_output_master = (
+        sum(fact_output_values) / len(fact_output_values) if fact_output_values else None
+    )
+
+    result.normhours = Metric(result.normhours.name, fact_normhours, plan_normhours)
     result.output_per_master = Metric(
-        result.output_per_master.name, plan_output_master, plan_output_master
+        result.output_per_master.name, fact_output_master, plan_output_master
     )
 
     result.active = self.orders.pipeline_active(division_key, week_end_incl)

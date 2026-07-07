@@ -5,8 +5,8 @@
 проверяет:
 - пайплайн Шаркера: active ≈ 40, overdue ≈ 114 (сверка с разведкой);
 - payments_period возвращает число (может быть 0) без ошибок; статья резолвится;
-- BLOCKED-ячейки (нормочасы/выработка ФАКТ, стоимость выработки, страховые ЗН)
-  записаны прочерком «—»;
+- нормочасы/выработка ФАКТ берутся из дневных показателей 1С, если они есть;
+- BLOCKED-ячейки (стоимость выработки, страховые ЗН) записаны прочерком «—»;
 - формулы колонки H целы.
 
 Только GET из 1С; запись только в xlsx. Если порт недоступен — код 2.
@@ -51,18 +51,20 @@ def _is_value(v) -> bool:
     return isinstance(v, (int, float))
 
 
-# Карта BLOCKED-ФАКТ ячеек и формул H по листам (см. INCREMENT7.md).
+# Карта FACT/BLOCKED ячеек и формул H по листам.
 SHOP = {
     "Шаркер": {
         "sheet": "Шаркер (Д)",
-        "blocked_dash": ["F8", "F9", "F24", "F25"],   # нормочасы/выработка ФАКТ, страховые ФАКТ
+        "fact_cells": {"normhours": "F8", "output_per_master": "F9"},
+        "blocked_dash": ["F24", "F25"],   # страховые ФАКТ
         "pipeline": {"active": "D13", "overdue": "D16"},
         "payments_fact": "F23",
         "h_formulas": ["H8", "H9", "H21", "H22", "H23", "H24", "H25"],
     },
     "ЦКР": {
         "sheet": "ЦКР (Д)",
-        "blocked_dash": ["F8", "F9", "D10", "F10", "F25", "F26"],  # +стоимость выработки D10/F10
+        "fact_cells": {"normhours": "F8", "output_per_master": "F9"},
+        "blocked_dash": ["D10", "F10", "F25", "F26"],  # стоимость выработки + страховые
         "pipeline": {"active": "D14", "overdue": "D17"},
         "payments_fact": "F24",
         "h_formulas": ["H8", "H9", "H10", "H22", "H23", "H24", "H25", "H26"],
@@ -96,8 +98,8 @@ def main() -> int:
         results[name] = m
 
         print("  ВЫРАБОТКА:")
-        print(f"    Нормочасы   ПЛАН={_fmt(m.normhours.plan)}  ФАКТ={_fmt(m.normhours.fact)} (BLOCKED)")
-        print(f"    Выработка   ПЛАН={_fmt(m.output_per_master.plan)}  ФАКТ={_fmt(m.output_per_master.fact)} (BLOCKED)")
+        print(f"    Нормочасы   ПЛАН={_fmt(m.normhours.plan)}  ФАКТ={_fmt(m.normhours.fact)}")
+        print(f"    Выработка   ПЛАН={_fmt(m.output_per_master.plan)}  ФАКТ={_fmt(m.output_per_master.fact)}")
         if name == "ЦКР":
             print(f"    Стоимость выработки ПЛАН={_fmt(m.output_cost.plan)}  ФАКТ={_fmt(m.output_cost.fact)} (BLOCKED)")
         print("  ПАЙПЛАЙН (значения 1С):")
@@ -133,6 +135,17 @@ def main() -> int:
             ok = _is_value(v) and abs(v - expect) < 0.01
             (passed if ok else failures).append(
                 f"{name}: {key} {cc}={_fmt(v)} (метрика {expect})"
+            )
+
+        # ФАКТ-ячейки либо число из 1С, либо «—», если дневной факт не введён.
+        for attr, cc in cfg["fact_cells"].items():
+            metric = getattr(m, attr)
+            v = ws[cc].value
+            ok = (_is_value(v) and metric.fact is not None and abs(v - metric.fact) < 0.01) or (
+                _is_dash(v) and metric.fact is None
+            )
+            (passed if ok else failures).append(
+                f"{name}: {attr} {cc}={_fmt(v)} (метрика {_fmt(metric.fact)})"
             )
 
         # BLOCKED-ячейки = «—».

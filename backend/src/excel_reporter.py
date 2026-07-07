@@ -177,7 +177,10 @@ class ExcelReporter:
 
 # ============================================================ ИНКРЕМЕНТ 6: МОЙКИ
 WASH_DAILY_SHEET = "Мойка (Д)"
-WASH_WEEKLY_SHEET = "Мойка (Н)"
+WASH_WEEKLY_SHEETS: dict[str, str] = {
+    "Мойка на ул. Строителей": "Мойка ул. Строителей (Н)",
+    "Мойка на ул. Ульяновская": "Мойка Ульяновская (Н)",
+}
 
 
 def fill_daily_wash(self, day, m_stroit, m_ulyan, out_path):
@@ -215,36 +218,34 @@ def fill_daily_wash(self, day, m_stroit, m_ulyan, out_path):
     return out
 
 
-def fill_weekly_wash(self, any_date, combined_weekly, day_breakdown, out_path):
-    """Заполняет лист «Мойка (Н)» (суммарно по обеим мойкам) и сохраняет.
+def fill_weekly_wash(self, report_name, weekly_metrics, day_breakdown, out_path):
+    """Заполняет отдельный недельный лист мойки и сохраняет.
 
-    Раздел 1: D9/F9 (машин недели), D10/F10 (выручка недели) — суммарно.
+    Раздел 1: D9/F9 (машин недели), D10/F10 (выручка недели).
     Раздел 2 «Динамика по дням» строки 15..21 (Пн..Вс): D=машин, F=выручка,
     I=операторов (опц.). НЕ трогает формулы Ср.чек (D11/F11, H15..H21) и
     строку 22 ИТОГО (D22/F22/H22).
-
-    combined_weekly — WashMetrics с суммарными ФАКТ/ПЛАН обеих моек за неделю.
-    day_breakdown — список из 7 WashMetrics (Пн..Вс) с суммарными значениями за день.
     """
+    sheet_name = WASH_WEEKLY_SHEETS.get(report_name)
+    if not sheet_name:
+        raise ValueError(f"Нет недельного листа мойки для отчёта '{report_name}'")
     wb = load_workbook(self.template_path, keep_vba=False, data_only=False)
-    if WASH_WEEKLY_SHEET not in wb.sheetnames:
-        raise ValueError(f"Лист '{WASH_WEEKLY_SHEET}' не найден в шаблоне")
-    ws = wb[WASH_WEEKLY_SHEET]
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист '{sheet_name}' не найден в шаблоне")
+    ws = wb[sheet_name]
 
-    cw = combined_weekly
+    w = weekly_metrics
 
-    # Шапка: C3 — АТЦ «Мойки», C4 — неделя, C5 — руководитель (пусто).
-    ws["C3"] = "Мойки"
+    ws["C3"] = report_name
     ws["C4"] = (
-        f"{cw.period_start.strftime('%d.%m')}–{cw.period_end.strftime('%d.%m.%Y')}"
+        f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
     )
     ws["C5"] = ""
 
-    # Раздел 1 — суммарно за неделю.
-    self._write(ws, "D9", self._num(cw.cars.plan))
-    self._write(ws, "F9", self._num(cw.cars.fact))
-    self._write(ws, "D10", self._num(cw.revenue.plan))
-    self._write(ws, "F10", self._num(cw.revenue.fact))
+    self._write(ws, "D9", self._num(w.cars.plan))
+    self._write(ws, "F9", self._num(w.cars.fact))
+    self._write(ws, "D10", self._num(w.revenue.plan))
+    self._write(ws, "F10", self._num(w.revenue.fact))
     # D11/F11 (Ср.чек), H-колонки — ФОРМУЛЫ, НЕ трогаем.
 
     # Раздел 2 — динамика по дням: строка 15 = Пн (индекс 0) .. строка 21 = Вс.
@@ -564,19 +565,22 @@ def fill_daily_wash_in_workbook(self, wb, day, m_stroit, m_ulyan) -> None:
     self._write(ws, "F15", self._num(m_ulyan.revenue.fact))
 
 
-def fill_weekly_wash_in_workbook(self, wb, combined_weekly, day_breakdown) -> None:
-    if WASH_WEEKLY_SHEET not in wb.sheetnames:
-        raise ValueError(f"Лист '{WASH_WEEKLY_SHEET}' не найден")
-    ws = wb[WASH_WEEKLY_SHEET]
-    cw = combined_weekly
+def fill_weekly_wash_in_workbook(self, wb, report_name, weekly_metrics, day_breakdown) -> None:
+    sheet_name = WASH_WEEKLY_SHEETS.get(report_name)
+    if not sheet_name:
+        raise ValueError(f"Нет недельного листа мойки для отчёта '{report_name}'")
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист '{sheet_name}' не найден")
+    ws = wb[sheet_name]
+    w = weekly_metrics
 
-    ws["C3"] = "Мойки"
-    ws["C4"] = f"{cw.period_start.strftime('%d.%m')}–{cw.period_end.strftime('%d.%m.%Y')}"
+    ws["C3"] = report_name
+    ws["C4"] = f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
     ws["C5"] = ""
-    self._write(ws, "D9", self._num(cw.cars.plan))
-    self._write(ws, "F9", self._num(cw.cars.fact))
-    self._write(ws, "D10", self._num(cw.revenue.plan))
-    self._write(ws, "F10", self._num(cw.revenue.fact))
+    self._write(ws, "D9", self._num(w.cars.plan))
+    self._write(ws, "F9", self._num(w.cars.fact))
+    self._write(ws, "D10", self._num(w.revenue.plan))
+    self._write(ws, "F10", self._num(w.revenue.fact))
     for i in range(7):
         row = 15 + i
         dm = day_breakdown[i]

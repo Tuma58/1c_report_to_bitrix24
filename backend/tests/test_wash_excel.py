@@ -2,10 +2,11 @@
 
 За 2026-07-01 (день) и неделю июля считает wash-метрики обеих моек
 («Мойка на ул. Строителей» → «Автомойка»; «Мойка на ул. Ульяновская» →
-«Мойка Ульяновская»), заполняет листы «Мойка (Д)» и «Мойка (Н)» и сохраняет
+«Мойка Ульяновская»), заполняет лист «Мойка (Д)» и два недельных листа
+отдельно по мойкам, сохраняет
 в output/. Затем ОТКРЫВАЕТ файлы и проверяет:
 - дневной: оба блока заполнены (D8/F8,D9/F9; D14/F14,D15/F15);
-- недельный: раздел 1 суммарно (D9/F9,D10/F10), раздел 2 по дням (D15:F21);
+- недельный: раздел 1 отдельно по мойке (D9/F9,D10/F10), раздел 2 по дням (D15:F21);
 - SUM(D15:D21)=машин недели, SUM(F15:F21)=выручка недели;
 - формульные ячейки (D10,D16 дневного; D11,H15,D22 недельного) остались формулами.
 
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from openpyxl import load_workbook  # noqa: E402
 
 from odata_client import ODataUnavailableError  # noqa: E402
-from metrics import MetricsService, WashMetrics, Metric  # noqa: E402
+from metrics import MetricsService  # noqa: E402
 from excel_reporter import ExcelReporter  # noqa: E402
 
 
@@ -50,35 +51,6 @@ def _is_formula(v) -> bool:
 
 def _is_value(v) -> bool:
     return isinstance(v, (int, float))
-
-
-def _sum_plan(a, b):
-    """Сумма ПЛАН-значений: None складывается как «нет» (если оба None -> None)."""
-    if a is None and b is None:
-        return None
-    return (a or 0.0) + (b or 0.0)
-
-
-def _combine(name, ma: WashMetrics, mb: WashMetrics) -> WashMetrics:
-    """Суммирует две WashMetrics (обе мойки) за один период в одну (ФАКТ+ПЛАН)."""
-    c = WashMetrics(
-        report_name=name,
-        period_start=ma.period_start,
-        period_end=ma.period_end,
-        division_key=None,
-    )
-    c.cars = Metric(
-        "Машин обслужено",
-        (ma.cars.fact or 0.0) + (mb.cars.fact or 0.0),
-        _sum_plan(ma.cars.plan, mb.cars.plan),
-    )
-    c.revenue = Metric(
-        "Выручка",
-        (ma.revenue.fact or 0.0) + (mb.revenue.fact or 0.0),
-        _sum_plan(ma.revenue.plan, mb.revenue.plan),
-    )
-    c.executors_count = (ma.executors_count or 0) + (mb.executors_count or 0)
-    return c
 
 
 def main() -> int:
@@ -135,63 +107,60 @@ def main() -> int:
     print(f"МОЙКИ — НЕДЕЛЬНЫЙ ОТЧЁТ (опорная {WEEK_DAY.isoformat()})")
     print("=" * 70)
 
-    w_stroit = service.weekly_wash(STROIT, WEEK_DAY)
-    w_ulyan = service.weekly_wash(ULYAN, WEEK_DAY)
-    combined = _combine("Мойки", w_stroit, w_ulyan)
+    weekly_cases = [
+        (STROIT, "Мойка ул. Строителей (Н)", service.weekly_wash(STROIT, WEEK_DAY),
+         service.week_wash_daily_breakdown(STROIT, WEEK_DAY)),
+        (ULYAN, "Мойка Ульяновская (Н)", service.weekly_wash(ULYAN, WEEK_DAY),
+         service.week_wash_daily_breakdown(ULYAN, WEEK_DAY)),
+    ]
+    saved_weekly = []
+    for report_name, sheet_name, weekly, breakdown in weekly_cases:
+        assert len(breakdown) == 7, "разбивка должна быть 7 дней"
+        print(f"  {report_name}: {weekly.period_start.isoformat()} .. {weekly.period_end.isoformat()}")
+        print(f"    Машин  ПЛАН={_fmt(weekly.cars.plan)}  ФАКТ={_fmt(weekly.cars.fact)}")
+        print(f"    Выручка ПЛАН={_fmt(weekly.revenue.plan)}  ФАКТ={_fmt(weekly.revenue.fact)}")
+        for nm, dm in zip(NAMES, breakdown):
+            print(f"    {nm} {dm.period_start.isoformat()}: машин={_fmt(dm.cars.fact)} "
+                  f"выручка={_fmt(dm.revenue.fact)} операторов={dm.executors_count}")
 
-    br_stroit = service.week_wash_daily_breakdown(STROIT, WEEK_DAY)
-    br_ulyan = service.week_wash_daily_breakdown(ULYAN, WEEK_DAY)
-    assert len(br_stroit) == 7 and len(br_ulyan) == 7, "разбивка должна быть 7 дней"
-    day_combined = [_combine("Мойки", a, b) for a, b in zip(br_stroit, br_ulyan)]
+        sum_cars_days = sum((dm.cars.fact or 0.0) for dm in breakdown)
+        sum_rev_days = sum((dm.revenue.fact or 0.0) for dm in breakdown)
 
-    print(f"  Неделя: {combined.period_start.isoformat()} .. {combined.period_end.isoformat()}")
-    print(f"  Машин  ПЛАН={_fmt(combined.cars.plan)}  ФАКТ={_fmt(combined.cars.fact)}")
-    print(f"  Выручка ПЛАН={_fmt(combined.revenue.plan)}  ФАКТ={_fmt(combined.revenue.fact)}")
-    print("  Динамика по дням (ФАКТ, суммарно обе мойки):")
-    for nm, dm in zip(NAMES, day_combined):
-        print(f"    {nm} {dm.period_start.isoformat()}: машин={_fmt(dm.cars.fact)} "
-              f"выручка={_fmt(dm.revenue.fact)} операторов={dm.executors_count}")
+        weekly_out = OUTPUT_DIR / f"wash_weekly_{sheet_name}_{WEEK_DAY.isoformat()}.xlsx"
+        saved_w = reporter.fill_weekly_wash(report_name, weekly, breakdown, weekly_out)
+        saved_weekly.append(saved_w)
+        print(f"  Сохранён: {saved_w}")
 
-    sum_cars_days = sum((dm.cars.fact or 0.0) for dm in day_combined)
-    sum_rev_days = sum((dm.revenue.fact or 0.0) for dm in day_combined)
+        wb2 = load_workbook(saved_w, data_only=False)
+        ws2 = wb2[sheet_name]
+        print(f"  [файл] {sheet_name}: C3={ws2['C3'].value!r}  C4={ws2['C4'].value!r}")
 
-    weekly_out = OUTPUT_DIR / f"wash_weekly_{WEEK_DAY.isoformat()}.xlsx"
-    saved_w = reporter.fill_weekly_wash(WEEK_DAY, combined, day_combined, weekly_out)
-    print(f"  Сохранён: {saved_w}")
+        for cc, expect in [("F9", weekly.cars.fact), ("F10", weekly.revenue.fact)]:
+            v = ws2[cc].value
+            ok = _is_value(v) and abs(v - expect) < 0.01
+            (passed if ok else failures).append(
+                f"{sheet_name} {cc}={_fmt(v)} (ожид {_fmt(expect)})"
+            )
 
-    wb2 = load_workbook(saved_w, data_only=False)
-    ws2 = wb2["Мойка (Н)"]
-    print(f"  [файл] C3={ws2['C3'].value!r}  C4={ws2['C4'].value!r}")
+        d_cells = sum((ws2[f"D{15+i}"].value or 0.0) for i in range(7)
+                      if _is_value(ws2[f"D{15+i}"].value))
+        f_cells = sum((ws2[f"F{15+i}"].value or 0.0) for i in range(7)
+                      if _is_value(ws2[f"F{15+i}"].value))
 
-    # Раздел 1 суммарно.
-    for cc, expect in [
-        ("F9", combined.cars.fact), ("F10", combined.revenue.fact),
-    ]:
-        v = ws2[cc].value
-        ok = _is_value(v) and abs(v - expect) < 0.01
-        (passed if ok else failures).append(f"недельный {cc}={_fmt(v)} (ожид {_fmt(expect)})")
-
-    # Раздел 2 динамика: строки 15..21 заполнены; сверка сумм с недельным ФАКТ.
-    d_cells = sum((ws2[f"D{15+i}"].value or 0.0) for i in range(7)
-                  if _is_value(ws2[f"D{15+i}"].value))
-    f_cells = sum((ws2[f"F{15+i}"].value or 0.0) for i in range(7)
-                  if _is_value(ws2[f"F{15+i}"].value))
-
-    ok_d = abs(d_cells - combined.cars.fact) < 0.01 and abs(d_cells - sum_cars_days) < 0.01
-    ok_f = abs(f_cells - combined.revenue.fact) < 0.01 and abs(f_cells - sum_rev_days) < 0.01
-    (passed if ok_d else failures).append(
-        f"SUM(D15:D21)={_fmt(d_cells)} = машин недели {_fmt(combined.cars.fact)}"
-    )
-    (passed if ok_f else failures).append(
-        f"SUM(F15:F21)={_fmt(f_cells)} = выручка недели {_fmt(combined.revenue.fact)}"
-    )
-
-    # Формулы недельного целы.
-    for cc in ["D11", "F11", "H15", "H21", "D22", "F22", "H22"]:
-        v = ws2[cc].value
-        (passed if _is_formula(v) else failures).append(
-            f"недельный {cc} — формула цела ({v!r})"
+        ok_d = abs(d_cells - weekly.cars.fact) < 0.01 and abs(d_cells - sum_cars_days) < 0.01
+        ok_f = abs(f_cells - weekly.revenue.fact) < 0.01 and abs(f_cells - sum_rev_days) < 0.01
+        (passed if ok_d else failures).append(
+            f"{sheet_name} SUM(D15:D21)={_fmt(d_cells)} = машин недели {_fmt(weekly.cars.fact)}"
         )
+        (passed if ok_f else failures).append(
+            f"{sheet_name} SUM(F15:F21)={_fmt(f_cells)} = выручка недели {_fmt(weekly.revenue.fact)}"
+        )
+
+        for cc in ["D11", "F11", "H15", "H21", "D22", "F22", "H22"]:
+            v = ws2[cc].value
+            (passed if _is_formula(v) else failures).append(
+                f"{sheet_name} {cc} — формула цела ({v!r})"
+            )
 
     # ----------------------------------------------------------- ОТЧЁТ
     print("=" * 70)
@@ -209,7 +178,8 @@ def main() -> int:
     print(f"  {STROIT}: машин={_fmt(d_stroit.cars.fact)}  выручка={_fmt(d_stroit.revenue.fact)}")
     print(f"  {ULYAN}: машин={_fmt(d_ulyan.cars.fact)}  выручка={_fmt(d_ulyan.revenue.fact)}")
     print(f"  xlsx дневной:   {saved_d}")
-    print(f"  xlsx недельный: {saved_w}")
+    for saved_w in saved_weekly:
+        print(f"  xlsx недельный: {saved_w}")
 
     return 1 if failures else 0
 

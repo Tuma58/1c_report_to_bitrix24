@@ -15,12 +15,12 @@ from pathlib import Path
 try:
     from .bitrix_sender import BitrixSender, BitrixError
     from .excel_reporter import ExcelReporter
-    from .metrics import Metric, MetricsService, WashMetrics
+    from .metrics import MetricsService
     from .odata_client import ODataError, ODataUnavailableError
 except ImportError:  # запуск как скрипта из backend/src
     from bitrix_sender import BitrixSender, BitrixError
     from excel_reporter import ExcelReporter
-    from metrics import Metric, MetricsService, WashMetrics
+    from metrics import MetricsService
     from odata_client import ODataError, ODataUnavailableError
 
 
@@ -50,33 +50,6 @@ def previous_week(ref: date) -> date:
     return ref - timedelta(days=ref.weekday() + 7)
 
 
-def _sum_plan(a, b):
-    if a is None and b is None:
-        return None
-    return (a or 0.0) + (b or 0.0)
-
-
-def combine_wash(name: str, a: WashMetrics, b: WashMetrics) -> WashMetrics:
-    result = WashMetrics(
-        report_name=name,
-        period_start=a.period_start,
-        period_end=a.period_end,
-        division_key=None,
-    )
-    result.cars = Metric(
-        "Машин обслужено",
-        (a.cars.fact or 0.0) + (b.cars.fact or 0.0),
-        _sum_plan(a.cars.plan, b.cars.plan),
-    )
-    result.revenue = Metric(
-        "Выручка",
-        (a.revenue.fact or 0.0) + (b.revenue.fact or 0.0),
-        _sum_plan(a.revenue.plan, b.revenue.plan),
-    )
-    result.executors_count = (a.executors_count or 0) + (b.executors_count or 0)
-    return result
-
-
 def fill_daily_sheets(service: MetricsService, reporter: ExcelReporter, wb, day: date) -> None:
     for name in SERVICE_REPORTS:
         metrics = service.daily(name, day)
@@ -104,13 +77,10 @@ def fill_weekly_sheets(
 
     stroit = service.weekly_wash(WASH_STROIT, any_date)
     ulyan = service.weekly_wash(WASH_ULYAN, any_date)
-    combined = combine_wash("Мойки", stroit, ulyan)
     days_stroit = service.week_wash_daily_breakdown(WASH_STROIT, any_date)
     days_ulyan = service.week_wash_daily_breakdown(WASH_ULYAN, any_date)
-    day_combined = [
-        combine_wash("Мойки", a, b) for a, b in zip(days_stroit, days_ulyan)
-    ]
-    reporter.fill_weekly_wash_in_workbook(wb, combined, day_combined)
+    reporter.fill_weekly_wash_in_workbook(wb, WASH_STROIT, stroit, days_stroit)
+    reporter.fill_weekly_wash_in_workbook(wb, WASH_ULYAN, ulyan, days_ulyan)
 
     for name in SHOP_REPORTS:
         weekly = service.weekly_shop(name, any_date)

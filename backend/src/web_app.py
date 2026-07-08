@@ -285,6 +285,17 @@ def _view_url(path: Path, sheet: str = "") -> str:
     return f"/view?{urlencode(query)}"
 
 
+def _view_location(path: Path, *, sheet: str = "", message: str = "", error: str = "") -> str:
+    query = {"file": path.name}
+    if sheet:
+        query["sheet"] = sheet
+    if message:
+        query["message"] = message
+    if error:
+        query["error"] = error
+    return f"/view?{urlencode(query)}"
+
+
 def _safe_output_path(filename: str) -> Optional[Path]:
     if not filename or "/" in filename or "\\" in filename or not filename.endswith(".xlsx"):
         return None
@@ -714,10 +725,25 @@ def _render_sheet_table(ws) -> str:
     return f"<table class=\"report-table\"><colgroup>{''.join(colgroup)}</colgroup>{''.join(rows)}</table>"
 
 
-def _report_view_page(path: Path, sheet_name: str = "") -> str:
+def _report_view_page(path: Path, sheet_name: str = "", message: str = "", error: str = "") -> str:
     wb = load_workbook(path, data_only=False)
     selected = sheet_name if sheet_name in wb.sheetnames else wb.sheetnames[0]
     ws = wb[selected]
+    selected_index = wb.sheetnames.index(selected)
+    prev_sheet = wb.sheetnames[selected_index - 1] if selected_index > 0 else ""
+    next_sheet = wb.sheetnames[selected_index + 1] if selected_index < len(wb.sheetnames) - 1 else ""
+    prev_button = (
+        f'<a class="button" href="{html.escape(_view_url(path, prev_sheet), quote=True)}">Назад</a>'
+        if prev_sheet
+        else '<span class="button disabled">Назад</span>'
+    )
+    next_button = (
+        f'<a class="button" href="{html.escape(_view_url(path, next_sheet), quote=True)}">Вперёд</a>'
+        if next_sheet
+        else '<span class="button disabled">Вперёд</span>'
+    )
+    message_html = f'<div class="notice ok">{html.escape(message)}</div>' if message else ""
+    error_html = f'<div class="notice err">{html.escape(error)}</div>' if error else ""
     tabs = []
     for name in wb.sheetnames:
         cls = " active" if name == selected else ""
@@ -741,6 +767,8 @@ def _report_view_page(path: Path, sheet_name: str = "") -> str:
       --line: #d9dee3;
       --accent: #167c80;
       --accent-dark: #0f5e61;
+      --danger: #b42318;
+      --ok: #1f7a4d;
       --shadow: 0 10px 28px rgba(32, 36, 40, .08);
     }}
     * {{ box-sizing: border-box; }}
@@ -782,6 +810,7 @@ def _report_view_page(path: Path, sheet_name: str = "") -> str:
     nav a, .button {{
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       min-height: 34px;
       padding: 6px 10px;
       border-radius: 6px;
@@ -792,7 +821,25 @@ def _report_view_page(path: Path, sheet_name: str = "") -> str:
       background: transparent;
     }}
     nav a:hover, .button:hover {{ background: #eef3f3; }}
+    .button.primary {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }}
+    .button.primary:hover {{ background: var(--accent-dark); }}
+    .button.disabled {{
+      color: #9aa2aa;
+      border-color: var(--line);
+      cursor: default;
+    }}
+    .button.disabled:hover {{ background: transparent; }}
     main {{ padding: 22px 0 40px; }}
+    .menu {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 16px;
+    }}
     .toolbar {{
       display: flex;
       gap: 10px;
@@ -805,6 +852,28 @@ def _report_view_page(path: Path, sheet_name: str = "") -> str:
       color: var(--muted);
       font-size: 13px;
       overflow-wrap: anywhere;
+    }}
+    .nav-actions {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+    }}
+    .notice {{
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      border: 1px solid;
+      background: #fff;
+    }}
+    .notice.ok {{
+      color: var(--ok);
+      border-color: rgba(31, 122, 77, .35);
+    }}
+    .notice.err {{
+      color: var(--danger);
+      border-color: rgba(180, 35, 24, .35);
     }}
     .tabs {{
       display: flex;
@@ -864,20 +933,29 @@ def _report_view_page(path: Path, sheet_name: str = "") -> str:
     <div class="wrap topbar">
       <h1>{APP_TITLE}</h1>
       <nav aria-label="Разделы">
-        <a href="/">Отчёт</a>
+        <a href="/">Создать отчёт</a>
+        <a href="/">Файлы</a>
         <a href="/settings">Настройки</a>
       </nav>
     </div>
   </header>
   <main class="wrap">
+    {message_html}
+    {error_html}
+    <div class="menu">
+      <a class="button primary" href="/">Новый отчёт</a>
+      <a class="button" href="{html.escape(_file_url(path), quote=True)}">Скачать Excel</a>
+      <a class="button" href="/settings">Настройки</a>
+    </div>
     <div class="toolbar">
       <div>
         <strong>{html.escape(selected)}</strong>
         <div class="file-name">{html.escape(path.name)}</div>
       </div>
-      <div>
-        <a class="button" href="{html.escape(_file_url(path), quote=True)}">Скачать Excel</a>
-        <a class="button" href="/">К генерации</a>
+      <div class="nav-actions">
+        {prev_button}
+        <span class="file-name">{selected_index + 1} / {len(wb.sheetnames)}</span>
+        {next_button}
       </div>
     </div>
     <div class="tabs">{''.join(tabs)}</div>
@@ -1190,6 +1268,18 @@ def _page(
       font-weight: 600;
     }}
     nav a:hover {{ background: #eef3f3; }}
+    .menu {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 16px;
+    }}
+    .menu .button.primary {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }}
+    .menu .button.primary:hover {{ background: var(--accent-dark); }}
     .notice {{
       border-radius: 8px;
       padding: 12px 14px;
@@ -1260,7 +1350,8 @@ def _page(
     <div class="wrap topbar">
       <h1>{APP_TITLE}</h1>
       <nav aria-label="Разделы">
-        <a href="/">Отчёт</a>
+        <a href="/">Создать отчёт</a>
+        <a href="#files">Файлы</a>
         <a href="/settings">Настройки</a>
       </nav>
     </div>
@@ -1268,6 +1359,11 @@ def _page(
   <main class="wrap">
     {message_html}
     {error_html}
+    <div class="menu">
+      <a class="button primary" href="/">Новый отчёт</a>
+      <a class="button" href="#files">Последние файлы</a>
+      <a class="button" href="/settings">Настройки</a>
+    </div>
     <div class="grid">
       <section class="panel">
         <h2>Настройка отчёта</h2>
@@ -1293,7 +1389,7 @@ def _page(
           </div>
         </form>
       </section>
-      <section class="panel">
+      <section id="files" class="panel">
         <h2>Последние файлы</h2>
         <ul class="file-list">{recent_html}</ul>
       </section>
@@ -1845,13 +1941,9 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             channels.append("email")
         suffix = f" Отправлено: {', '.join(channels)}." if channels else ""
         self._redirect(
-            self._report_location(
-                mode=mode,
-                report_date=report_date,
-                send_bitrix=send_bitrix,
-                send_email=send_email,
+            _view_location(
+                generated[0].path,
                 message=f"Отчёт сформирован за {elapsed:.1f} сек.{suffix}",
-                generated=generated,
             )
         )
 
@@ -1885,7 +1977,14 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             return
         sheet_name = params.get("sheet", [""])[0]
         try:
-            self._send_html(_report_view_page(path, sheet_name))
+            self._send_html(
+                _report_view_page(
+                    path,
+                    sheet_name,
+                    message=params.get("message", [""])[0],
+                    error=params.get("error", [""])[0],
+                )
+            )
         except (OSError, ValueError) as exc:
             self._send_html(
                 _page(error=f"Не удалось открыть книгу для просмотра: {exc}"),

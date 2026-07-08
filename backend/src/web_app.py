@@ -19,7 +19,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, unquote, urlparse
 
 try:
     from .bitrix_sender import BitrixError
@@ -1000,6 +1000,17 @@ def _settings_page(message: str = "", error: str = "") -> str:
 </html>"""
 
 
+def _reports_from_query(params: dict[str, list[str]]) -> list[GeneratedReport]:
+    reports: list[GeneratedReport] = []
+    for filename in params.get("file", []):
+        if not filename or "/" in filename or "\\" in filename or not filename.endswith(".xlsx"):
+            continue
+        path = (OUTPUT_DIR / filename).resolve()
+        if OUTPUT_DIR.resolve() in path.parents and path.exists():
+            reports.append(GeneratedReport("Файл", filename, path))
+    return reports
+
+
 class ReportWebHandler(BaseHTTPRequestHandler):
     server_version = "ATCReportWeb/1.0"
 
@@ -1043,6 +1054,44 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _report_location(
+        self,
+        *,
+        mode: str = "all",
+        report_date: Optional[date] = None,
+        send_bitrix: bool = False,
+        message: str = "",
+        error: str = "",
+        generated: Optional[list[GeneratedReport]] = None,
+    ) -> str:
+        query: dict[str, object] = {
+            "mode": mode,
+            "send_bitrix": "1" if send_bitrix else "0",
+        }
+        if report_date is not None:
+            query["date"] = report_date.isoformat()
+        if message:
+            query["message"] = message
+        if error:
+            query["error"] = error
+        if generated:
+            query["file"] = [report.path.name for report in generated]
+        return "/?" + urlencode(query, doseq=True)
+
+    def _settings_location(self, *, message: str = "", error: str = "") -> str:
+        query = {}
+        if message:
+            query["message"] = message
+        if error:
+            query["error"] = error
+        return "/settings" + (("?" + urlencode(query)) if query else "")
+
     def _send_error_page(
         self,
         error: str,
@@ -1066,10 +1115,33 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send_html(_page())
+            params = parse_qs(parsed.query)
+            mode = params.get("mode", ["all"])[0]
+            if mode not in MODES:
+                mode = "all"
+            try:
+                selected_date = _parse_report_date(params.get("date", [""])[0])
+            except ValueError:
+                selected_date = _default_date()
+            self._send_html(
+                _page(
+                    selected_mode=mode,
+                    selected_date=selected_date,
+                    send_bitrix=params.get("send_bitrix", [""])[0] == "1",
+                    message=params.get("message", [""])[0],
+                    error=params.get("error", [""])[0],
+                    generated=_reports_from_query(params),
+                )
+            )
             return
         if parsed.path == "/settings":
-            self._send_html(_settings_page())
+            params = parse_qs(parsed.query)
+            self._send_html(
+                _settings_page(
+                    message=params.get("message", [""])[0],
+                    error=params.get("error", [""])[0],
+                )
+            )
             return
         if parsed.path == "/download":
             self._download(parsed.query)
@@ -1126,18 +1198,15 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         form = parse_qs(raw)
         values, error = _validated_settings(form)
         if error:
-            self._send_html(_settings_page(error=error), HTTPStatus.BAD_REQUEST)
+            self._redirect(self._settings_location(error=error))
             return
         try:
             _write_env_values(values)
             _reload_runtime_settings(values)
         except OSError as exc:
-            self._send_html(
-                _settings_page(error=f"Не удалось сохранить backend/.env: {exc}"),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
+            self._redirect(self._settings_location(error=f"Не удалось сохранить backend/.env: {exc}"))
             return
-        self._send_html(_settings_page(message="Настройки сохранены."))
+        self._redirect(self._settings_location(message="Настройки сохранены."))
 
     def _generate_report(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1148,15 +1217,23 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         send_bitrix = form.get("send_bitrix", [""])[0] == "1"
 
         if mode not in MODES:
-            self._send_error_page("Неизвестный режим отчёта.", send_bitrix=send_bitrix)
+            self._redirect(
+                self._report_location(
+                    mode="all",
+                    send_bitrix=send_bitrix,
+                    error="Неизвестный режим отчёта.",
+                )
+            )
             return
         try:
             report_date = _parse_report_date(date_raw)
         except ValueError:
-            self._send_error_page(
-                "Дата должна быть в формате YYYY-MM-DD.",
-                selected_mode=mode,
-                send_bitrix=send_bitrix,
+            self._redirect(
+                self._report_location(
+                    mode=mode,
+                    send_bitrix=send_bitrix,
+                    error="Дата должна быть в формате YYYY-MM-DD.",
+                )
             )
             return
 
@@ -1172,28 +1249,32 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             if send_bitrix:
                 send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
         except ODataUnavailableError as exc:
-            self._send_error_page(
-                f"OData недоступен: {exc}",
-                selected_mode=mode,
-                selected_date=report_date,
-                send_bitrix=send_bitrix,
+            self._redirect(
+                self._report_location(
+                    mode=mode,
+                    report_date=report_date,
+                    send_bitrix=send_bitrix,
+                    error=f"OData недоступен: {exc}",
+                )
             )
             return
         except (ODataError, BitrixError, RuntimeError) as exc:
-            self._send_error_page(
-                str(exc),
-                selected_mode=mode,
-                selected_date=report_date,
-                send_bitrix=send_bitrix,
+            self._redirect(
+                self._report_location(
+                    mode=mode,
+                    report_date=report_date,
+                    send_bitrix=send_bitrix,
+                    error=str(exc),
+                )
             )
             return
 
         elapsed = time.monotonic() - started
         suffix = " Отправлено в Bitrix24." if send_bitrix else ""
-        self._send_html(
-            _page(
-                selected_mode=mode,
-                selected_date=report_date,
+        self._redirect(
+            self._report_location(
+                mode=mode,
+                report_date=report_date,
                 send_bitrix=send_bitrix,
                 message=f"Отчёт сформирован за {elapsed:.1f} сек.{suffix}",
                 generated=generated,

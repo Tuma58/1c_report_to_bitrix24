@@ -15,6 +15,7 @@ backend/venv/
 backend/.env
 backend/.env.*
 !backend/.env.example
+backend/users.json
 
 # Generated reports and transient office files
 backend/output/

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import argparse
+import hashlib
 import html
+import json
 import os
 import re
 import secrets
@@ -59,6 +61,8 @@ APP_TITLE = "Отчёты АТЦ"
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BACKEND_DIR / ".env"
 ENV_EXAMPLE_PATH = BACKEND_DIR / ".env.example"
+USERS_PATH = BACKEND_DIR / "users.json"
+PASSWORD_HASH_ITERATIONS = 260_000
 MODES = {
     "all": "Все листы",
     "daily": "День",
@@ -343,6 +347,126 @@ def _current_settings() -> dict[str, str]:
 
 def _setting_status(value: str) -> str:
     return "задано" if value else "не задано"
+
+
+def _hash_password(password: str, salt: Optional[str] = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def _verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations_raw, salt, expected = encoded.split("$", 3)
+        iterations = int(iterations_raw)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    ).hex()
+    return secrets.compare_digest(digest, expected)
+
+
+def _env_admin_user() -> Optional[dict]:
+    password = os.getenv("WEB_UI_PASSWORD", "").strip()
+    if not password:
+        return None
+    username = os.getenv("WEB_UI_USER", "admin").strip() or "admin"
+    return {
+        "username": username,
+        "password_hash": _hash_password(password),
+        "is_admin": True,
+        "blocked": False,
+    }
+
+
+def _load_users() -> dict[str, dict]:
+    users: dict[str, dict] = {}
+    if USERS_PATH.exists():
+        try:
+            data = json.loads(USERS_PATH.read_text(encoding="utf-8"))
+            raw_users = data.get("users", {})
+            if isinstance(raw_users, dict):
+                for username, record in raw_users.items():
+                    if isinstance(record, dict):
+                        users[str(username)] = {
+                            "username": str(username),
+                            "password_hash": str(record.get("password_hash", "")),
+                            "is_admin": bool(record.get("is_admin", False)),
+                            "blocked": bool(record.get("blocked", False)),
+                        }
+        except (OSError, json.JSONDecodeError):
+            users = {}
+    if not users:
+        admin = _env_admin_user()
+        if admin:
+            users[admin["username"]] = admin
+    return users
+
+
+def _save_users(users: dict[str, dict]) -> None:
+    USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "users": {
+            username: {
+                "password_hash": record.get("password_hash", ""),
+                "is_admin": bool(record.get("is_admin", False)),
+                "blocked": bool(record.get("blocked", False)),
+            }
+            for username, record in sorted(users.items())
+        }
+    }
+    tmp = USERS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(USERS_PATH)
+    os.chmod(USERS_PATH, 0o600)
+
+
+def _authenticate_credentials(username: str, password: str) -> Optional[dict]:
+    users = _load_users()
+    if users:
+        record = users.get(username)
+        if not record or record.get("blocked"):
+            return None
+        if not _verify_password(password, record.get("password_hash", "")):
+            return None
+        return {
+            "username": username,
+            "is_admin": bool(record.get("is_admin", False)),
+            "blocked": False,
+        }
+
+    expected_password = os.getenv("WEB_UI_PASSWORD", "").strip()
+    if not expected_password:
+        return {"username": "anonymous", "is_admin": True, "blocked": False}
+    expected_user = os.getenv("WEB_UI_USER", "admin").strip() or "admin"
+    if secrets.compare_digest(username, expected_user) and secrets.compare_digest(password, expected_password):
+        return {"username": username, "is_admin": True, "blocked": False}
+    return None
+
+
+def _parse_basic_auth(header: str) -> Optional[tuple[str, str]]:
+    if not header.startswith("Basic "):
+        return None
+    try:
+        raw = base64.b64decode(header[6:]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    username, sep, password = raw.partition(":")
+    if not sep:
+        return None
+    return username, password
 
 
 def _write_env_values(values: dict[str, str]) -> None:
@@ -936,6 +1060,7 @@ def _report_view_page(path: Path, sheet_name: str = "", message: str = "", error
         <a href="/">Создать отчёт</a>
         <a href="/">Файлы</a>
         <a href="/settings">Настройки</a>
+        <a href="/users">Пользователи</a>
       </nav>
     </div>
   </header>
@@ -1353,6 +1478,7 @@ def _page(
         <a href="/">Создать отчёт</a>
         <a href="#files">Файлы</a>
         <a href="/settings">Настройки</a>
+        <a href="/users">Пользователи</a>
       </nav>
     </div>
   </header>
@@ -1363,6 +1489,7 @@ def _page(
       <a class="button primary" href="/">Новый отчёт</a>
       <a class="button" href="#files">Последние файлы</a>
       <a class="button" href="/settings">Настройки</a>
+      <a class="button" href="/users">Пользователи</a>
     </div>
     <div class="grid">
       <section class="panel">
@@ -1622,8 +1749,9 @@ def _settings_page(message: str = "", error: str = "") -> str:
     <div class="wrap topbar">
       <h1>{APP_TITLE}</h1>
       <nav aria-label="Разделы">
-        <a href="/">Отчёт</a>
+        <a href="/">Создать отчёт</a>
         <a href="/settings">Настройки</a>
+        <a href="/users">Пользователи</a>
       </nav>
     </div>
   </header>
@@ -1631,6 +1759,231 @@ def _settings_page(message: str = "", error: str = "") -> str:
     {message_html}
     {error_html}
     {_settings_form(_current_settings())}
+  </main>
+</body>
+</html>"""
+
+
+def _active_admin_count(users: dict[str, dict]) -> int:
+    return sum(1 for record in users.values() if record.get("is_admin") and not record.get("blocked"))
+
+
+def _users_page(current_user: dict, message: str = "", error: str = "") -> str:
+    users = _load_users()
+    message_html = f'<div class="notice ok">{html.escape(message)}</div>' if message else ""
+    error_html = f'<div class="notice err">{html.escape(error)}</div>' if error else ""
+    rows = []
+    for username, record in sorted(users.items()):
+        is_self = username == current_user.get("username")
+        blocked = bool(record.get("blocked"))
+        role = "admin" if record.get("is_admin") else "user"
+        status = "заблокирован" if blocked else "активен"
+        block_action = "unblock" if blocked else "block"
+        block_label = "Разблокировать" if blocked else "Заблокировать"
+        disabled_self = " disabled" if is_self else ""
+        rows.append(
+            f"""
+            <tr>
+              <td><strong>{html.escape(username)}</strong>{' <span class="muted">(вы)</span>' if is_self else ''}</td>
+              <td>{html.escape(role)}</td>
+              <td>{html.escape(status)}</td>
+              <td>
+                <form method="post" action="/users" class="inline-form">
+                  <input type="hidden" name="action" value="password">
+                  <input type="hidden" name="username" value="{html.escape(username, quote=True)}">
+                  <input type="password" name="password" placeholder="Новый пароль" autocomplete="new-password" required>
+                  <button type="submit">Сменить</button>
+                </form>
+              </td>
+              <td>
+                <form method="post" action="/users" class="inline-form">
+                  <input type="hidden" name="action" value="{block_action}">
+                  <input type="hidden" name="username" value="{html.escape(username, quote=True)}">
+                  <button type="submit"{disabled_self}>{block_label}</button>
+                </form>
+              </td>
+              <td>
+                <form method="post" action="/users" class="inline-form">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="username" value="{html.escape(username, quote=True)}">
+                  <button type="submit"{disabled_self}>Удалить</button>
+                </form>
+              </td>
+            </tr>
+            """
+        )
+    table = "".join(rows) or '<tr><td colspan="6">Пользователей нет</td></tr>'
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{APP_TITLE} · Пользователи</title>
+  <style>
+    :root {{
+      --bg: #f6f7f8;
+      --panel: #ffffff;
+      --text: #202428;
+      --muted: #687079;
+      --line: #d9dee3;
+      --accent: #167c80;
+      --accent-dark: #0f5e61;
+      --danger: #b42318;
+      --ok: #1f7a4d;
+      --shadow: 0 10px 28px rgba(32, 36, 40, .08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    header {{ border-bottom: 1px solid var(--line); background: #fff; }}
+    .wrap {{ width: min(1180px, calc(100% - 32px)); margin: 0 auto; }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 64px;
+      gap: 16px;
+    }}
+    h1 {{ margin: 0; font-size: 22px; font-weight: 650; letter-spacing: 0; }}
+    main {{ padding: 28px 0 40px; }}
+    nav {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }}
+    nav a, .button {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      color: var(--accent-dark);
+      text-decoration: none;
+      font-weight: 600;
+      border: 1px solid transparent;
+      background: transparent;
+    }}
+    nav a:hover, .button:hover {{ background: #eef3f3; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+      margin-bottom: 18px;
+    }}
+    h2 {{ margin: 0 0 16px; font-size: 16px; font-weight: 650; letter-spacing: 0; }}
+    input[type="text"], input[type="password"] {{
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+    }}
+    button {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 7px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }}
+    button:hover {{ background: var(--accent-dark); }}
+    button:disabled {{
+      cursor: not-allowed;
+      border-color: var(--line);
+      background: #eef1f3;
+      color: var(--muted);
+    }}
+    .notice {{
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      border: 1px solid;
+      background: #fff;
+    }}
+    .notice.ok {{ color: var(--ok); border-color: rgba(31, 122, 77, .35); }}
+    .notice.err {{ color: var(--danger); border-color: rgba(180, 35, 24, .35); }}
+    .create-form {{
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+    }}
+    .hint {{
+      margin: -6px 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .check {{ display: flex; align-items: center; gap: 8px; color: var(--text); font-weight: 500; }}
+    .table-wrap {{ overflow: auto; }}
+    table {{ width: 100%; border-collapse: collapse; min-width: 900px; }}
+    th, td {{ border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: middle; }}
+    th {{ color: #30363c; font-size: 13px; background: #eef3f3; }}
+    .inline-form {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0; }}
+    .inline-form input[type="password"] {{ width: 180px; }}
+    .muted {{ color: var(--muted); font-size: 12px; }}
+    @media (max-width: 760px) {{
+      .topbar {{ align-items: flex-start; flex-direction: column; padding: 14px 0; }}
+      nav {{ justify-content: flex-start; }}
+      .create-form {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <h1>{APP_TITLE}</h1>
+      <nav aria-label="Разделы">
+        <a href="/">Создать отчёт</a>
+        <a href="/settings">Настройки</a>
+        <a href="/users">Пользователи</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {message_html}
+    {error_html}
+    <section class="panel">
+      <h2>Новый пользователь</h2>
+      <p class="hint">Учётные записи сохраняются в backend/users.json. Управление доступно только роли admin.</p>
+      <form method="post" action="/users" class="create-form">
+        <input type="hidden" name="action" value="create">
+        <input type="text" name="username" placeholder="Логин" autocomplete="username" required>
+        <input type="password" name="password" placeholder="Пароль" autocomplete="new-password" required>
+        <label class="check"><input type="checkbox" name="is_admin" value="1"> <span>admin</span></label>
+        <button type="submit">Создать</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Пользователи</h2>
+      <p class="hint">Текущего пользователя и последнего активного admin нельзя удалить или заблокировать.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Логин</th>
+              <th>Роль</th>
+              <th>Статус</th>
+              <th>Пароль</th>
+              <th>Доступ</th>
+              <th>Удаление</th>
+            </tr>
+          </thead>
+          <tbody>{table}</tbody>
+        </table>
+      </div>
+    </section>
   </main>
 </body>
 </html>"""
@@ -1659,26 +2012,23 @@ class ReportWebHandler(BaseHTTPRequestHandler):
     server_version = "ATCReportWeb/1.0"
 
     def _auth_required(self) -> bool:
-        return bool(os.getenv("WEB_UI_PASSWORD", "").strip())
+        return bool(_load_users() or os.getenv("WEB_UI_PASSWORD", "").strip())
+
+    def _current_user(self) -> Optional[dict]:
+        if hasattr(self, "_cached_user"):
+            return self._cached_user
+        if not self._auth_required():
+            self._cached_user = {"username": "anonymous", "is_admin": True, "blocked": False}
+            return self._cached_user
+        credentials = _parse_basic_auth(self.headers.get("Authorization", ""))
+        if credentials is None:
+            self._cached_user = None
+            return None
+        self._cached_user = _authenticate_credentials(credentials[0], credentials[1])
+        return self._cached_user
 
     def _is_authorized(self) -> bool:
-        password = os.getenv("WEB_UI_PASSWORD", "").strip()
-        if not password:
-            return True
-        expected_user = os.getenv("WEB_UI_USER", "admin").strip() or "admin"
-        header = self.headers.get("Authorization", "")
-        if not header.startswith("Basic "):
-            return False
-        try:
-            raw = base64.b64decode(header[6:]).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return False
-        user, sep, supplied_password = raw.partition(":")
-        if not sep:
-            return False
-        return secrets.compare_digest(user, expected_user) and secrets.compare_digest(
-            supplied_password, password
-        )
+        return self._current_user() is not None
 
     def _require_auth(self) -> bool:
         if self._is_authorized():
@@ -1688,6 +2038,18 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write("Требуется авторизация".encode("utf-8"))
+        return True
+
+    def _require_admin(self) -> bool:
+        if self._require_auth():
+            return True
+        user = self._current_user()
+        if user and user.get("is_admin"):
+            return False
+        self.send_response(HTTPStatus.FORBIDDEN)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Доступно только admin".encode("utf-8"))
         return True
 
     def _send_html(self, content: str, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -1737,6 +2099,14 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         if error:
             query["error"] = error
         return "/settings" + (("?" + urlencode(query)) if query else "")
+
+    def _users_location(self, *, message: str = "", error: str = "") -> str:
+        query = {}
+        if message:
+            query["message"] = message
+        if error:
+            query["error"] = error
+        return "/users" + (("?" + urlencode(query)) if query else "")
 
     def _send_error_page(
         self,
@@ -1791,6 +2161,18 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                 )
             )
             return
+        if parsed.path == "/users":
+            if self._require_admin():
+                return
+            params = parse_qs(parsed.query)
+            self._send_html(
+                _users_page(
+                    self._current_user() or {},
+                    message=params.get("message", [""])[0],
+                    error=params.get("error", [""])[0],
+                )
+            )
+            return
         if parsed.path == "/view":
             self._view_report(parsed.query)
             return
@@ -1823,6 +2205,15 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             return
+        if parsed.path == "/users":
+            if self._require_admin():
+                return
+            data = _users_page(self._current_user() or {}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
         if parsed.path == "/view":
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1843,10 +2234,77 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/settings":
             self._save_settings()
             return
+        if parsed.path == "/users":
+            self._save_user_action()
+            return
         if parsed.path == "/generate":
             self._generate_report()
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _save_user_action(self) -> None:
+        if self._require_admin():
+            return
+        current = self._current_user() or {}
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8")
+        form = parse_qs(raw)
+        action = form.get("action", [""])[0]
+        username = form.get("username", [""])[0].strip()
+        users = _load_users()
+
+        if not username or not re.fullmatch(r"[A-Za-z0-9_.@-]{3,64}", username):
+            self._redirect(self._users_location(error="Логин должен быть 3-64 символа: латиница, цифры, _ . @ -"))
+            return
+
+        try:
+            if action == "create":
+                if username in users:
+                    raise ValueError("Пользователь уже существует")
+                password = form.get("password", [""])[0]
+                if len(password) < 8:
+                    raise ValueError("Пароль должен быть не короче 8 символов")
+                users[username] = {
+                    "username": username,
+                    "password_hash": _hash_password(password),
+                    "is_admin": form.get("is_admin", [""])[0] == "1",
+                    "blocked": False,
+                }
+                message = "Пользователь создан."
+            elif action == "password":
+                if username not in users:
+                    raise ValueError("Пользователь не найден")
+                password = form.get("password", [""])[0]
+                if len(password) < 8:
+                    raise ValueError("Пароль должен быть не короче 8 символов")
+                users[username]["password_hash"] = _hash_password(password)
+                message = "Пароль изменён."
+            elif action in ("block", "unblock"):
+                if username not in users:
+                    raise ValueError("Пользователь не найден")
+                if username == current.get("username"):
+                    raise ValueError("Нельзя заблокировать самого себя")
+                new_blocked = action == "block"
+                if new_blocked and users[username].get("is_admin") and _active_admin_count(users) <= 1:
+                    raise ValueError("Нельзя заблокировать последнего активного admin")
+                users[username]["blocked"] = new_blocked
+                message = "Доступ изменён."
+            elif action == "delete":
+                if username not in users:
+                    raise ValueError("Пользователь не найден")
+                if username == current.get("username"):
+                    raise ValueError("Нельзя удалить самого себя")
+                if users[username].get("is_admin") and _active_admin_count(users) <= 1:
+                    raise ValueError("Нельзя удалить последнего активного admin")
+                del users[username]
+                message = "Пользователь удалён."
+            else:
+                raise ValueError("Неизвестное действие")
+            _save_users(users)
+        except (OSError, ValueError) as exc:
+            self._redirect(self._users_location(error=str(exc)))
+            return
+        self._redirect(self._users_location(message=message))
 
     def _save_settings(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")

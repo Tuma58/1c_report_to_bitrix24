@@ -47,6 +47,16 @@ nano /opt/1c_report/backend/.env
 grep '^WEB_UI_PASSWORD=' /opt/1c_report/backend/.env
 ```
 
+Пользователями web-интерфейса управляет только роль `admin`:
+
+```text
+http://<ip-vps>:8080/users
+```
+
+На этой странице можно создать пользователя, сменить пароль, заблокировать
+доступ или удалить учётную запись. Данные хранятся в
+`/opt/1c_report/backend/users.json`; файл не коммитится в Git.
+
 ## Проверка
 
 ```bash

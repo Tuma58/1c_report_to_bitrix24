@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -489,7 +491,15 @@ def new_workbook(self):
 def save_workbook(self, wb, out_path) -> Path:
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".xlsx", dir=str(out.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        wb.save(tmp)
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return out
 
 

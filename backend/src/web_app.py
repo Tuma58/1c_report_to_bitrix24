@@ -16,6 +16,7 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -63,6 +64,9 @@ ENV_PATH = BACKEND_DIR / ".env"
 ENV_EXAMPLE_PATH = BACKEND_DIR / ".env.example"
 USERS_PATH = BACKEND_DIR / "users.json"
 PASSWORD_HASH_ITERATIONS = 260_000
+SETTINGS_LOCK = threading.RLock()
+USERS_LOCK = threading.RLock()
+GENERATION_LOCK = threading.RLock()
 MODES = {
     "all": "Все листы",
     "daily": "День",
@@ -337,12 +341,13 @@ def _read_env_file(path: Path) -> dict[str, str]:
 
 
 def _current_settings() -> dict[str, str]:
-    values = _read_env_file(ENV_EXAMPLE_PATH)
-    values.update(_read_env_file(ENV_PATH))
-    for key in SETTINGS_KEYS:
-        if key not in values:
-            values[key] = os.getenv(key, "")
-    return values
+    with SETTINGS_LOCK:
+        values = _read_env_file(ENV_EXAMPLE_PATH)
+        values.update(_read_env_file(ENV_PATH))
+        for key in SETTINGS_KEYS:
+            if key not in values:
+                values[key] = os.getenv(key, "")
+        return values
 
 
 def _setting_status(value: str) -> str:
@@ -391,46 +396,48 @@ def _env_admin_user() -> Optional[dict]:
 
 
 def _load_users() -> dict[str, dict]:
-    users: dict[str, dict] = {}
-    if USERS_PATH.exists():
-        try:
-            data = json.loads(USERS_PATH.read_text(encoding="utf-8"))
-            raw_users = data.get("users", {})
-            if isinstance(raw_users, dict):
-                for username, record in raw_users.items():
-                    if isinstance(record, dict):
-                        users[str(username)] = {
-                            "username": str(username),
-                            "password_hash": str(record.get("password_hash", "")),
-                            "is_admin": bool(record.get("is_admin", False)),
-                            "blocked": bool(record.get("blocked", False)),
-                        }
-        except (OSError, json.JSONDecodeError):
-            users = {}
-    if not users:
-        admin = _env_admin_user()
-        if admin:
-            users[admin["username"]] = admin
-    return users
+    with USERS_LOCK:
+        users: dict[str, dict] = {}
+        if USERS_PATH.exists():
+            try:
+                data = json.loads(USERS_PATH.read_text(encoding="utf-8"))
+                raw_users = data.get("users", {})
+                if isinstance(raw_users, dict):
+                    for username, record in raw_users.items():
+                        if isinstance(record, dict):
+                            users[str(username)] = {
+                                "username": str(username),
+                                "password_hash": str(record.get("password_hash", "")),
+                                "is_admin": bool(record.get("is_admin", False)),
+                                "blocked": bool(record.get("blocked", False)),
+                            }
+            except (OSError, json.JSONDecodeError):
+                users = {}
+        if not users:
+            admin = _env_admin_user()
+            if admin:
+                users[admin["username"]] = admin
+        return users
 
 
 def _save_users(users: dict[str, dict]) -> None:
-    USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "users": {
-            username: {
-                "password_hash": record.get("password_hash", ""),
-                "is_admin": bool(record.get("is_admin", False)),
-                "blocked": bool(record.get("blocked", False)),
+    with USERS_LOCK:
+        USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "users": {
+                username: {
+                    "password_hash": record.get("password_hash", ""),
+                    "is_admin": bool(record.get("is_admin", False)),
+                    "blocked": bool(record.get("blocked", False)),
+                }
+                for username, record in sorted(users.items())
             }
-            for username, record in sorted(users.items())
         }
-    }
-    tmp = USERS_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(USERS_PATH)
-    os.chmod(USERS_PATH, 0o600)
+        tmp = USERS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        tmp.replace(USERS_PATH)
+        os.chmod(USERS_PATH, 0o600)
 
 
 def _authenticate_credentials(username: str, password: str) -> Optional[dict]:
@@ -470,57 +477,59 @@ def _parse_basic_auth(header: str) -> Optional[tuple[str, str]]:
 
 
 def _write_env_values(values: dict[str, str]) -> None:
-    source = ENV_PATH if ENV_PATH.exists() else ENV_EXAMPLE_PATH
-    lines = source.read_text(encoding="utf-8").splitlines() if source.exists() else []
-    updated: list[str] = []
-    seen: set[str] = set()
+    with SETTINGS_LOCK:
+        source = ENV_PATH if ENV_PATH.exists() else ENV_EXAMPLE_PATH
+        lines = source.read_text(encoding="utf-8").splitlines() if source.exists() else []
+        updated: list[str] = []
+        seen: set[str] = set()
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in line:
-            key, _value = line.split("=", 1)
-            key = key.strip()
-            if key in values:
-                updated.append(f"{key}={values[key]}")
-                seen.add(key)
-                continue
-        updated.append(line)
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in line:
+                key, _value = line.split("=", 1)
+                key = key.strip()
+                if key in values:
+                    updated.append(f"{key}={values[key]}")
+                    seen.add(key)
+                    continue
+            updated.append(line)
 
-    missing = [key for key in SETTINGS_KEYS if key not in seen]
-    if missing:
-        if updated and updated[-1].strip():
-            updated.append("")
-        for key in missing:
-            updated.append(f"{key}={values.get(key, '')}")
+        missing = [key for key in SETTINGS_KEYS if key not in seen]
+        if missing:
+            if updated and updated[-1].strip():
+                updated.append("")
+            for key in missing:
+                updated.append(f"{key}={values.get(key, '')}")
 
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".env.", dir=str(ENV_PATH.parent), text=True)
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(updated).rstrip() + "\n")
-        os.chmod(tmp_path, 0o600)
-        tmp_path.replace(ENV_PATH)
-        os.chmod(ENV_PATH, 0o600)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".env.", dir=str(ENV_PATH.parent), text=True)
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(updated).rstrip() + "\n")
+            os.chmod(tmp_path, 0o600)
+            tmp_path.replace(ENV_PATH)
+            os.chmod(ENV_PATH, 0o600)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
 
 def _reload_runtime_settings(values: dict[str, str]) -> None:
-    for key in SETTINGS_KEYS:
-        os.environ[key] = values.get(key, "")
+    with SETTINGS_LOCK:
+        for key in SETTINGS_KEYS:
+            os.environ[key] = values.get(key, "")
 
-    for module_name in ("config", "odata_client", "bitrix_sender", "email_sender"):
-        module = sys.modules.get(module_name) or sys.modules.get(f"{__package__}.{module_name}")
-        if module is None:
-            continue
-        if module_name == "config" and hasattr(module, "Settings"):
-            module.settings = module.Settings.from_env()
-        elif hasattr(module, "default_settings"):
-            config_module = sys.modules.get("config") or sys.modules.get(f"{__package__}.config")
-            if config_module is not None and hasattr(config_module, "settings"):
-                module.default_settings = config_module.settings
+        for module_name in ("config", "odata_client", "bitrix_sender", "email_sender"):
+            module = sys.modules.get(module_name) or sys.modules.get(f"{__package__}.{module_name}")
+            if module is None:
+                continue
+            if module_name == "config" and hasattr(module, "Settings"):
+                module.settings = module.Settings.from_env()
+            elif hasattr(module, "default_settings"):
+                config_module = sys.modules.get("config") or sys.modules.get(f"{__package__}.config")
+                if config_module is not None and hasattr(config_module, "settings"):
+                    module.default_settings = config_module.settings
 
 
 def _validated_settings(form: dict[str, list[str]]) -> tuple[dict[str, str], Optional[str]]:
@@ -2251,56 +2260,57 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         form = parse_qs(raw)
         action = form.get("action", [""])[0]
         username = form.get("username", [""])[0].strip()
-        users = _load_users()
 
         if not username or not re.fullmatch(r"[A-Za-z0-9_.@-]{3,64}", username):
             self._redirect(self._users_location(error="Логин должен быть 3-64 символа: латиница, цифры, _ . @ -"))
             return
 
         try:
-            if action == "create":
-                if username in users:
-                    raise ValueError("Пользователь уже существует")
-                password = form.get("password", [""])[0]
-                if len(password) < 8:
-                    raise ValueError("Пароль должен быть не короче 8 символов")
-                users[username] = {
-                    "username": username,
-                    "password_hash": _hash_password(password),
-                    "is_admin": form.get("is_admin", [""])[0] == "1",
-                    "blocked": False,
-                }
-                message = "Пользователь создан."
-            elif action == "password":
-                if username not in users:
-                    raise ValueError("Пользователь не найден")
-                password = form.get("password", [""])[0]
-                if len(password) < 8:
-                    raise ValueError("Пароль должен быть не короче 8 символов")
-                users[username]["password_hash"] = _hash_password(password)
-                message = "Пароль изменён."
-            elif action in ("block", "unblock"):
-                if username not in users:
-                    raise ValueError("Пользователь не найден")
-                if username == current.get("username"):
-                    raise ValueError("Нельзя заблокировать самого себя")
-                new_blocked = action == "block"
-                if new_blocked and users[username].get("is_admin") and _active_admin_count(users) <= 1:
-                    raise ValueError("Нельзя заблокировать последнего активного admin")
-                users[username]["blocked"] = new_blocked
-                message = "Доступ изменён."
-            elif action == "delete":
-                if username not in users:
-                    raise ValueError("Пользователь не найден")
-                if username == current.get("username"):
-                    raise ValueError("Нельзя удалить самого себя")
-                if users[username].get("is_admin") and _active_admin_count(users) <= 1:
-                    raise ValueError("Нельзя удалить последнего активного admin")
-                del users[username]
-                message = "Пользователь удалён."
-            else:
-                raise ValueError("Неизвестное действие")
-            _save_users(users)
+            with USERS_LOCK:
+                users = _load_users()
+                if action == "create":
+                    if username in users:
+                        raise ValueError("Пользователь уже существует")
+                    password = form.get("password", [""])[0]
+                    if len(password) < 8:
+                        raise ValueError("Пароль должен быть не короче 8 символов")
+                    users[username] = {
+                        "username": username,
+                        "password_hash": _hash_password(password),
+                        "is_admin": form.get("is_admin", [""])[0] == "1",
+                        "blocked": False,
+                    }
+                    message = "Пользователь создан."
+                elif action == "password":
+                    if username not in users:
+                        raise ValueError("Пользователь не найден")
+                    password = form.get("password", [""])[0]
+                    if len(password) < 8:
+                        raise ValueError("Пароль должен быть не короче 8 символов")
+                    users[username]["password_hash"] = _hash_password(password)
+                    message = "Пароль изменён."
+                elif action in ("block", "unblock"):
+                    if username not in users:
+                        raise ValueError("Пользователь не найден")
+                    if username == current.get("username"):
+                        raise ValueError("Нельзя заблокировать самого себя")
+                    new_blocked = action == "block"
+                    if new_blocked and users[username].get("is_admin") and _active_admin_count(users) <= 1:
+                        raise ValueError("Нельзя заблокировать последнего активного admin")
+                    users[username]["blocked"] = new_blocked
+                    message = "Доступ изменён."
+                elif action == "delete":
+                    if username not in users:
+                        raise ValueError("Пользователь не найден")
+                    if username == current.get("username"):
+                        raise ValueError("Нельзя удалить самого себя")
+                    if users[username].get("is_admin") and _active_admin_count(users) <= 1:
+                        raise ValueError("Нельзя удалить последнего активного admin")
+                    del users[username]
+                    message = "Пользователь удалён."
+                else:
+                    raise ValueError("Неизвестное действие")
+                _save_users(users)
         except (OSError, ValueError) as exc:
             self._redirect(self._users_location(error=str(exc)))
             return
@@ -2315,8 +2325,9 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             self._redirect(self._settings_location(error=error))
             return
         try:
-            _write_env_values(values)
-            _reload_runtime_settings(values)
+            with SETTINGS_LOCK:
+                _write_env_values(values)
+                _reload_runtime_settings(values)
         except OSError as exc:
             self._redirect(self._settings_location(error=f"Не удалось сохранить backend/.env: {exc}"))
             return
@@ -2357,17 +2368,18 @@ class ReportWebHandler(BaseHTTPRequestHandler):
 
         started = time.monotonic()
         try:
-            service = MetricsService()
-            reporter = ExcelReporter()
-            daily_day = report_date
-            weekly_day = report_date
-            if mode == "weekly":
+            with GENERATION_LOCK, SETTINGS_LOCK:
+                service = MetricsService()
+                reporter = ExcelReporter()
+                daily_day = report_date
                 weekly_day = report_date
-            generated = generate_workbook(service, reporter, mode, daily_day, weekly_day)
-            if send_bitrix:
-                send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
-            if send_email:
-                send_to_email(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+                if mode == "weekly":
+                    weekly_day = report_date
+                generated = generate_workbook(service, reporter, mode, daily_day, weekly_day)
+                if send_bitrix:
+                    send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+                if send_email:
+                    send_to_email(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
         except ODataUnavailableError as exc:
             self._redirect(
                 self._report_location(

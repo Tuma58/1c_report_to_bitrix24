@@ -12,6 +12,7 @@ import html
 import os
 import secrets
 import sys
+import tempfile
 import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -45,11 +46,97 @@ except ImportError:  # запуск как скрипта из backend/src
 
 
 APP_TITLE = "Отчёты АТЦ"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+ENV_PATH = BACKEND_DIR / ".env"
+ENV_EXAMPLE_PATH = BACKEND_DIR / ".env.example"
 MODES = {
     "all": "Все листы",
     "daily": "День",
     "weekly": "Неделя",
 }
+SETTINGS_FIELDS = [
+    {
+        "key": "ODATA_BASE_URL",
+        "label": "URL 1С OData",
+        "section": "1С OData",
+        "help": "Например: http://host/base/odata/standard.odata/",
+    },
+    {
+        "key": "ODATA_LOGIN",
+        "label": "Логин 1С",
+        "section": "1С OData",
+        "autocomplete": "username",
+    },
+    {
+        "key": "ODATA_PASSWORD",
+        "label": "Пароль 1С",
+        "section": "1С OData",
+        "secret": True,
+        "autocomplete": "current-password",
+    },
+    {
+        "key": "ODATA_TIMEOUT",
+        "label": "Таймаут OData, сек.",
+        "section": "1С OData",
+        "kind": "int",
+        "min": 1,
+        "max": 600,
+    },
+    {
+        "key": "ODATA_RETRIES",
+        "label": "Повторы OData",
+        "section": "1С OData",
+        "kind": "int",
+        "min": 1,
+        "max": 20,
+    },
+    {
+        "key": "BITRIX_WEBHOOK_URL",
+        "label": "Webhook Bitrix24",
+        "section": "Bitrix24",
+        "secret": True,
+        "help": "URL вида https://portal.bitrix24.ru/rest/<user>/<token>/",
+        "autocomplete": "off",
+    },
+    {
+        "key": "BITRIX_CHAT_ID",
+        "label": "ID чата Bitrix24",
+        "section": "Bitrix24",
+        "help": "Например: chat123",
+    },
+    {
+        "key": "BITRIX_DISK_FOLDER_ID",
+        "label": "ID папки Диска Bitrix24",
+        "section": "Bitrix24",
+    },
+    {
+        "key": "WEB_UI_HOST",
+        "label": "Адрес Web UI",
+        "section": "Web UI",
+        "help": "0.0.0.0 для доступа извне, 127.0.0.1 для reverse proxy.",
+    },
+    {
+        "key": "WEB_UI_PORT",
+        "label": "Порт Web UI",
+        "section": "Web UI",
+        "kind": "port",
+        "help": "Порты 80 и 443 запрещены для этого приложения.",
+    },
+    {
+        "key": "WEB_UI_USER",
+        "label": "Логин Web UI",
+        "section": "Web UI",
+        "autocomplete": "username",
+    },
+    {
+        "key": "WEB_UI_PASSWORD",
+        "label": "Пароль Web UI",
+        "section": "Web UI",
+        "secret": True,
+        "autocomplete": "new-password",
+    },
+]
+SETTINGS_KEYS = [field["key"] for field in SETTINGS_FIELDS]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -83,6 +170,202 @@ def _recent_reports(limit: int = 10) -> list[Path]:
 
 def _fmt_mtime(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime).strftime("%d.%m.%Y %H:%M")
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value
+    return values
+
+
+def _current_settings() -> dict[str, str]:
+    values = _read_env_file(ENV_EXAMPLE_PATH)
+    values.update(_read_env_file(ENV_PATH))
+    for key in SETTINGS_KEYS:
+        if key not in values:
+            values[key] = os.getenv(key, "")
+    return values
+
+
+def _setting_status(value: str) -> str:
+    return "задано" if value else "не задано"
+
+
+def _write_env_values(values: dict[str, str]) -> None:
+    source = ENV_PATH if ENV_PATH.exists() else ENV_EXAMPLE_PATH
+    lines = source.read_text(encoding="utf-8").splitlines() if source.exists() else []
+    updated: list[str] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in line:
+            key, _value = line.split("=", 1)
+            key = key.strip()
+            if key in values:
+                updated.append(f"{key}={values[key]}")
+                seen.add(key)
+                continue
+        updated.append(line)
+
+    missing = [key for key in SETTINGS_KEYS if key not in seen]
+    if missing:
+        if updated and updated[-1].strip():
+            updated.append("")
+        for key in missing:
+            updated.append(f"{key}={values.get(key, '')}")
+
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".env.", dir=str(ENV_PATH.parent), text=True)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(updated).rstrip() + "\n")
+        os.chmod(tmp_path, 0o600)
+        tmp_path.replace(ENV_PATH)
+        os.chmod(ENV_PATH, 0o600)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def _reload_runtime_settings(values: dict[str, str]) -> None:
+    for key in SETTINGS_KEYS:
+        os.environ[key] = values.get(key, "")
+
+    for module_name in ("config", "odata_client", "bitrix_sender"):
+        module = sys.modules.get(module_name) or sys.modules.get(f"{__package__}.{module_name}")
+        if module is None:
+            continue
+        if module_name == "config" and hasattr(module, "Settings"):
+            module.settings = module.Settings.from_env()
+        elif hasattr(module, "default_settings"):
+            config_module = sys.modules.get("config") or sys.modules.get(f"{__package__}.config")
+            if config_module is not None and hasattr(config_module, "settings"):
+                module.default_settings = config_module.settings
+
+
+def _validated_settings(form: dict[str, list[str]]) -> tuple[dict[str, str], Optional[str]]:
+    current = _current_settings()
+    values = dict(current)
+
+    for field in SETTINGS_FIELDS:
+        key = field["key"]
+        raw = form.get(key, [""])[0]
+        if "\n" in raw or "\r" in raw:
+            return values, f"{field['label']}: переносы строк недопустимы."
+        raw = raw.strip()
+
+        if field.get("secret"):
+            if form.get(f"{key}__clear", [""])[0] == "1":
+                values[key] = ""
+            elif raw:
+                values[key] = raw
+            else:
+                values[key] = current.get(key, "")
+        else:
+            values[key] = raw
+
+    for field in SETTINGS_FIELDS:
+        key = field["key"]
+        value = values.get(key, "")
+        kind = field.get("kind")
+        if kind in ("int", "port"):
+            try:
+                numeric = int(value)
+            except ValueError:
+                return values, f"{field['label']}: укажите целое число."
+            min_value = int(field.get("min", 1))
+            max_value = int(field.get("max", 65535))
+            if numeric < min_value or numeric > max_value:
+                return values, f"{field['label']}: допустимо от {min_value} до {max_value}."
+            if kind == "port" and numeric in (80, 443):
+                return values, "Web UI не должен занимать порты 80 и 443."
+            values[key] = str(numeric)
+
+    return values, None
+
+
+def _settings_form(values: dict[str, str]) -> str:
+    sections: list[str] = []
+    for section in dict.fromkeys(field["section"] for field in SETTINGS_FIELDS):
+        controls = []
+        for field in SETTINGS_FIELDS:
+            if field["section"] != section:
+                continue
+            key = field["key"]
+            value = values.get(key, "")
+            label = html.escape(field["label"])
+            help_text = field.get("help", "")
+            autocomplete = html.escape(field.get("autocomplete", "off"))
+            if field.get("secret"):
+                status = html.escape(_setting_status(value))
+                controls.append(
+                    f"""
+                    <div class="field">
+                      <div class="label-row">
+                        <label class="title" for="{key}">{label}</label>
+                        <span class="secret-state">{status}</span>
+                      </div>
+                      <input id="{key}" name="{key}" type="password"
+                             autocomplete="{autocomplete}"
+                             placeholder="Оставьте пустым, чтобы не менять">
+                      <label class="check small">
+                        <input type="checkbox" name="{key}__clear" value="1">
+                        <span>Очистить значение</span>
+                      </label>
+                      {f'<p class="hint">{html.escape(help_text)}</p>' if help_text else ''}
+                    </div>
+                    """
+                )
+            else:
+                input_type = "number" if field.get("kind") in ("int", "port") else "text"
+                extra = ""
+                if field.get("kind") in ("int", "port"):
+                    extra = (
+                        f' min="{int(field.get("min", 1))}"'
+                        f' max="{int(field.get("max", 65535))}"'
+                        ' step="1"'
+                    )
+                controls.append(
+                    f"""
+                    <div class="field">
+                      <label class="title" for="{key}">{label}</label>
+                      <input id="{key}" name="{key}" type="{input_type}"
+                             value="{html.escape(value, quote=True)}"
+                             autocomplete="{autocomplete}"{extra}>
+                      {f'<p class="hint">{html.escape(help_text)}</p>' if help_text else ''}
+                    </div>
+                    """
+                )
+        sections.append(
+            f"""
+            <fieldset>
+              <legend>{html.escape(section)}</legend>
+              {''.join(controls)}
+            </fieldset>
+            """
+        )
+
+    return f"""
+    <section class="panel">
+      <h2>Секреты и подключения</h2>
+      <form method="post" action="/settings" autocomplete="off">
+        {''.join(sections)}
+        <div class="actions">
+          <button type="submit">Сохранить настройки</button>
+          <a class="button secondary" href="/">Вернуться к отчёту</a>
+        </div>
+      </form>
+    </section>
+    """
 
 
 def _page(
@@ -231,7 +514,7 @@ def _page(
       font-size: 13px;
       color: #30363c;
     }}
-    input[type="date"] {{
+    input[type="date"], input[type="text"], input[type="password"], input[type="number"] {{
       width: 100%;
       min-height: 42px;
       border: 1px solid var(--line);
@@ -240,6 +523,41 @@ def _page(
       font: inherit;
       color: var(--text);
       background: #fff;
+    }}
+    input::placeholder {{ color: #9aa2aa; }}
+    .label-row {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+    .secret-state {{
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }}
+    .hint {{
+      margin: -2px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    fieldset {{
+      display: grid;
+      gap: 14px;
+      margin: 0;
+      padding: 0 0 18px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+    }}
+    fieldset:last-of-type {{
+      border-bottom: 0;
+      padding-bottom: 0;
+    }}
+    legend {{
+      padding: 0;
+      margin: 0 0 2px;
+      font-size: 14px;
+      font-weight: 700;
     }}
     .seg {{
       display: grid;
@@ -286,6 +604,16 @@ def _page(
       height: 18px;
       accent-color: var(--accent);
     }}
+    .check.small {{
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 400;
+    }}
+    .check.small input {{
+      width: 16px;
+      height: 16px;
+    }}
     .actions {{
       display: flex;
       gap: 12px;
@@ -308,6 +636,33 @@ def _page(
       cursor: pointer;
     }}
     button:hover, .button:hover {{ background: var(--accent-dark); }}
+    .button.secondary {{
+      background: #fff;
+      color: var(--accent-dark);
+      border-color: var(--line);
+    }}
+    .button.secondary:hover {{
+      background: #eef3f3;
+      border-color: #b8c5c6;
+    }}
+    nav {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+    }}
+    nav a {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      color: var(--accent-dark);
+      text-decoration: none;
+      font-weight: 600;
+    }}
+    nav a:hover {{ background: #eef3f3; }}
     .notice {{
       border-radius: 8px;
       padding: 12px 14px;
@@ -368,7 +723,10 @@ def _page(
   <header>
     <div class="wrap topbar">
       <h1>{APP_TITLE}</h1>
-      <div class="status">1С OData · Excel · Bitrix24</div>
+      <nav aria-label="Разделы">
+        <a href="/">Отчёт</a>
+        <a href="/settings">Настройки</a>
+      </nav>
     </div>
   </header>
   <main class="wrap">
@@ -401,6 +759,242 @@ def _page(
       </section>
       {generated_html}
     </div>
+  </main>
+</body>
+</html>"""
+
+
+def _settings_page(message: str = "", error: str = "") -> str:
+    message_html = f'<div class="notice ok">{html.escape(message)}</div>' if message else ""
+    error_html = f'<div class="notice err">{html.escape(error)}</div>' if error else ""
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{APP_TITLE} · Настройки</title>
+  <style>
+    :root {{
+      --bg: #f6f7f8;
+      --panel: #ffffff;
+      --text: #202428;
+      --muted: #687079;
+      --line: #d9dee3;
+      --accent: #167c80;
+      --accent-dark: #0f5e61;
+      --danger: #b42318;
+      --ok: #1f7a4d;
+      --shadow: 0 10px 28px rgba(32, 36, 40, .08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    header {{
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }}
+    .wrap {{
+      width: min(1040px, calc(100% - 32px));
+      margin: 0 auto;
+    }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 64px;
+      gap: 16px;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }}
+    main {{
+      padding: 28px 0 40px;
+    }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }}
+    h2 {{
+      margin: 0 0 16px;
+      font-size: 16px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }}
+    form {{
+      display: grid;
+      gap: 18px;
+    }}
+    .field {{
+      display: grid;
+      gap: 8px;
+    }}
+    label.title {{
+      font-weight: 600;
+      font-size: 13px;
+      color: #30363c;
+    }}
+    input[type="date"], input[type="text"], input[type="password"], input[type="number"] {{
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+    }}
+    input::placeholder {{ color: #9aa2aa; }}
+    .label-row {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+    .secret-state {{
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }}
+    .hint {{
+      margin: -2px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    fieldset {{
+      display: grid;
+      gap: 14px;
+      margin: 0;
+      padding: 0 0 18px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+    }}
+    fieldset:last-of-type {{
+      border-bottom: 0;
+      padding-bottom: 0;
+    }}
+    legend {{
+      padding: 0;
+      margin: 0 0 2px;
+      font-size: 14px;
+      font-weight: 700;
+    }}
+    .check {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-weight: 500;
+    }}
+    .check input {{
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }}
+    .check.small {{
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 400;
+    }}
+    .check.small input {{
+      width: 16px;
+      height: 16px;
+    }}
+    .actions {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }}
+    button, .button {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 9px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 650;
+      text-decoration: none;
+      cursor: pointer;
+    }}
+    button:hover, .button:hover {{ background: var(--accent-dark); }}
+    .button.secondary {{
+      background: #fff;
+      color: var(--accent-dark);
+      border-color: var(--line);
+    }}
+    .button.secondary:hover {{
+      background: #eef3f3;
+      border-color: #b8c5c6;
+    }}
+    nav {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+    }}
+    nav a {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      color: var(--accent-dark);
+      text-decoration: none;
+      font-weight: 600;
+    }}
+    nav a:hover {{ background: #eef3f3; }}
+    .notice {{
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      border: 1px solid;
+      background: #fff;
+    }}
+    .notice.ok {{
+      color: var(--ok);
+      border-color: rgba(31, 122, 77, .35);
+    }}
+    .notice.err {{
+      color: var(--danger);
+      border-color: rgba(180, 35, 24, .35);
+    }}
+    @media (max-width: 760px) {{
+      .topbar {{ align-items: flex-start; flex-direction: column; padding: 14px 0; }}
+      nav {{ justify-content: flex-start; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <h1>{APP_TITLE}</h1>
+      <nav aria-label="Разделы">
+        <a href="/">Отчёт</a>
+        <a href="/settings">Настройки</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {message_html}
+    {error_html}
+    {_settings_form(_current_settings())}
   </main>
 </body>
 </html>"""
@@ -474,6 +1068,9 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_html(_page())
             return
+        if parsed.path == "/settings":
+            self._send_html(_settings_page())
+            return
         if parsed.path == "/download":
             self._download(parsed.query)
             return
@@ -496,6 +1093,13 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             return
+        if parsed.path == "/settings":
+            data = _settings_page().encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
         if parsed.path == "/health":
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -508,9 +1112,34 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         if self._require_auth():
             return
         parsed = urlparse(self.path)
-        if parsed.path != "/generate":
-            self.send_error(HTTPStatus.NOT_FOUND)
+        if parsed.path == "/settings":
+            self._save_settings()
             return
+        if parsed.path == "/generate":
+            self._generate_report()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _save_settings(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8")
+        form = parse_qs(raw)
+        values, error = _validated_settings(form)
+        if error:
+            self._send_html(_settings_page(error=error), HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            _write_env_values(values)
+            _reload_runtime_settings(values)
+        except OSError as exc:
+            self._send_html(
+                _settings_page(error=f"Не удалось сохранить backend/.env: {exc}"),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+        self._send_html(_settings_page(message="Настройки сохранены."))
+
+    def _generate_report(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length).decode("utf-8")
         form = parse_qs(raw)

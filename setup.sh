@@ -216,4 +216,6 @@ Next steps:
    cd $BACKEND_DIR/src && ../venv/bin/python generate_reports.py --mode all --send-bitrix
 5. Open Web UI:
    http://$WEB_URL_HOST:$WEB_UI_PORT_VALUE/
+6. Open Web UI settings:
+   http://$WEB_URL_HOST:$WEB_UI_PORT_VALUE/settings
 EOF

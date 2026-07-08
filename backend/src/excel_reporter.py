@@ -77,9 +77,9 @@ class ExcelReporter:
             raise ValueError(f"Лист '{sheet_name}' не найден в шаблоне")
         ws = wb[sheet_name]
 
-        # Шапка: C3 — название АТЦ, C4 — дата строкой ДД.ММ.ГГГГ.
-        ws["C3"] = report_name
-        ws["C4"] = day.strftime("%d.%m.%Y")
+        # Шапка: D3/D4 — широкая объединённая область D:I.
+        ws["D3"] = report_name
+        ws["D4"] = day.strftime("%d.%m.%Y")
 
         # Блок «Выработка» (D=ПЛАН / F=ФАКТ).
         self._write(ws, "D8", self._num(metrics.normhours.plan))
@@ -136,12 +136,12 @@ class ExcelReporter:
 
         w = weekly_metrics
 
-        # Шапка: C3 — АТЦ, C4 — неделя строкой ДД.ММ–ДД.ММ.ГГГГ, C5 — руководитель (нет данных).
-        ws["C3"] = report_name
-        ws["C4"] = (
+        # Шапка: D3/D4/D5 — широкая объединённая область D:I.
+        ws["D3"] = report_name
+        ws["D4"] = (
             f"{w.week_start.strftime('%d.%m')}–{w.week_end.strftime('%d.%m.%Y')}"
         )
-        ws["C5"] = ""  # руководитель — данных нет
+        ws["D5"] = ""  # руководитель — данных нет
 
         # Раздел 1 «Выработка».
         self._write(ws, "D9", self._num(w.normhours.plan))
@@ -195,9 +195,9 @@ def fill_daily_wash(self, day, m_stroit, m_ulyan, out_path):
         raise ValueError(f"Лист '{WASH_DAILY_SHEET}' не найден в шаблоне")
     ws = wb[WASH_DAILY_SHEET]
 
-    # Шапка: C3 — АТЦ «Мойки», C4 — дата ДД.ММ.ГГГГ.
-    ws["C3"] = "Мойки"
-    ws["C4"] = day.strftime("%d.%m.%Y")
+    # Шапка: D3/D4 — широкая объединённая область D:I.
+    ws["D3"] = "Мойки"
+    ws["D4"] = day.strftime("%d.%m.%Y")
 
     # Блок 1 — Мойка на ул. Строителей.
     self._write(ws, "D8", self._num(m_stroit.cars.plan))
@@ -236,11 +236,11 @@ def fill_weekly_wash(self, report_name, weekly_metrics, day_breakdown, out_path)
 
     w = weekly_metrics
 
-    ws["C3"] = report_name
-    ws["C4"] = (
+    ws["D3"] = report_name
+    ws["D4"] = (
         f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
     )
-    ws["C5"] = ""
+    ws["D5"] = ""
 
     self._write(ws, "D9", self._num(w.cars.plan))
     self._write(ws, "F9", self._num(w.cars.fact))
@@ -333,8 +333,8 @@ def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     m = shop_metrics
 
     # Шапка: C3 — АТЦ, C4 — дата.
-    ws["C3"] = report_name
-    ws["C4"] = m.day.strftime("%d.%m.%Y")
+    ws["D3"] = report_name
+    ws["D4"] = m.day.strftime("%d.%m.%Y")
 
     # ---- ВЫРАБОТКА (план / факт) ----
     d, f = cmap["normhours"]
@@ -436,9 +436,9 @@ def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_
     ws = wb[sheet_name]
     m = weekly_metrics
 
-    ws["C3"] = report_name
-    ws["C4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
-    ws["C5"] = ""
+    ws["D3"] = report_name
+    ws["D4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
+    ws["D5"] = ""
 
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
@@ -499,8 +499,8 @@ def fill_daily_in_workbook(self, wb, report_name: str, day: date, metrics: Daily
         raise ValueError(f"Лист дневного отчёта '{report_name}' не найден")
     ws = wb[sheet_name]
 
-    ws["C3"] = report_name
-    ws["C4"] = day.strftime("%d.%m.%Y")
+    ws["D3"] = report_name
+    ws["D4"] = day.strftime("%d.%m.%Y")
     self._write(ws, "D8", self._num(metrics.normhours.plan))
     self._write(ws, "F8", self._num(metrics.normhours.fact))
     self._write(ws, "D9", self._num(metrics.output_per_master.plan))
@@ -524,9 +524,9 @@ def fill_weekly_in_workbook(self, wb, report_name: str, weekly_metrics, day_metr
     ws = wb[sheet_name]
     w = weekly_metrics
 
-    ws["C3"] = report_name
-    ws["C4"] = f"{w.week_start.strftime('%d.%m')}–{w.week_end.strftime('%d.%m.%Y')}"
-    ws["C5"] = ""
+    ws["D3"] = report_name
+    ws["D4"] = f"{w.week_start.strftime('%d.%m')}–{w.week_end.strftime('%d.%m.%Y')}"
+    ws["D5"] = ""
     self._write(ws, "D9", self._num(w.normhours.plan))
     self._write(ws, "F9", self._num(w.normhours.fact))
     self._write(ws, "D10", self._num(w.output_per_master.plan))
@@ -553,8 +553,8 @@ def fill_daily_wash_in_workbook(self, wb, day, m_stroit, m_ulyan) -> None:
         raise ValueError(f"Лист '{WASH_DAILY_SHEET}' не найден")
     ws = wb[WASH_DAILY_SHEET]
 
-    ws["C3"] = "Мойки"
-    ws["C4"] = day.strftime("%d.%m.%Y")
+    ws["D3"] = "Мойки"
+    ws["D4"] = day.strftime("%d.%m.%Y")
     self._write(ws, "D8", self._num(m_stroit.cars.plan))
     self._write(ws, "F8", self._num(m_stroit.cars.fact))
     self._write(ws, "D9", self._num(m_stroit.revenue.plan))
@@ -574,9 +574,9 @@ def fill_weekly_wash_in_workbook(self, wb, report_name, weekly_metrics, day_brea
     ws = wb[sheet_name]
     w = weekly_metrics
 
-    ws["C3"] = report_name
-    ws["C4"] = f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
-    ws["C5"] = ""
+    ws["D3"] = report_name
+    ws["D4"] = f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
+    ws["D5"] = ""
     self._write(ws, "D9", self._num(w.cars.plan))
     self._write(ws, "F9", self._num(w.cars.fact))
     self._write(ws, "D10", self._num(w.revenue.plan))
@@ -598,8 +598,8 @@ def fill_daily_shop_in_workbook(self, wb, report_name: str, shop_metrics) -> Non
     ws = wb[sheet_name]
     m = shop_metrics
 
-    ws["C3"] = report_name
-    ws["C4"] = m.day.strftime("%d.%m.%Y")
+    ws["D3"] = report_name
+    ws["D4"] = m.day.strftime("%d.%m.%Y")
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
     self._write(ws, f, self._num(m.normhours.fact))
@@ -635,9 +635,9 @@ def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day
     ws = wb[sheet_name]
     m = weekly_metrics
 
-    ws["C3"] = report_name
-    ws["C4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
-    ws["C5"] = ""
+    ws["D3"] = report_name
+    ws["D4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
+    ws["D5"] = ""
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
     self._write(ws, f, self._num(m.normhours.fact))

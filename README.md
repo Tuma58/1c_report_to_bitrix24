@@ -36,6 +36,9 @@ nano /opt/1c_report/backend/.env
 - `BITRIX_WEBHOOK_URL` — входящий REST webhook Bitrix24.
 - `BITRIX_CHAT_ID` — ID чата Bitrix24.
 - `BITRIX_DISK_FOLDER_ID` — ID папки Диска для загрузки книги.
+- `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_LOGIN`, `EMAIL_SMTP_PASSWORD` — SMTP-доступ для email-рассылки.
+- `EMAIL_FROM`, `EMAIL_TO` — отправитель и получатели email.
+- `SCHEDULE_*` — расписание автоматической генерации и каналы рассылки.
 - `WEB_UI_USER` и `WEB_UI_PASSWORD` — доступ к web-интерфейсу.
 
 Пароль web-интерфейса генерируется автоматически, если `WEB_UI_PASSWORD` пустой. Посмотреть его можно так:
@@ -60,6 +63,12 @@ cd /opt/1c_report/backend/src && ../venv/bin/python generate_reports.py --mode a
 
 ```bash
 cd /opt/1c_report/backend/src && ../venv/bin/python generate_reports.py --mode all --send-bitrix
+```
+
+Сформировать книгу и отправить по email:
+
+```bash
+cd /opt/1c_report/backend/src && ../venv/bin/python generate_reports.py --mode all --send-email
 ```
 
 ## Web-интерфейс

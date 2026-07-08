@@ -92,6 +92,31 @@ configure_web_env() {
   chmod 600 "$ENV_FILE"
 }
 
+configure_schedule_env() {
+  ensure_env_var "EMAIL_SMTP_HOST" ""
+  ensure_env_var "EMAIL_SMTP_PORT" "587"
+  ensure_env_var "EMAIL_SMTP_LOGIN" ""
+  ensure_env_var "EMAIL_SMTP_PASSWORD" ""
+  ensure_env_var "EMAIL_FROM" ""
+  ensure_env_var "EMAIL_TO" ""
+  ensure_env_var "EMAIL_USE_TLS" "1"
+  ensure_env_var "EMAIL_USE_SSL" "0"
+
+  ensure_env_var "SCHEDULE_ENABLED" "0"
+  ensure_env_var "SCHEDULE_DAILY_ENABLED" "1"
+  ensure_env_var "SCHEDULE_DAILY_TIME" "11:00"
+  ensure_env_var "SCHEDULE_WEEKLY_ENABLED" "1"
+  ensure_env_var "SCHEDULE_WEEKLY_DAY" "5"
+  ensure_env_var "SCHEDULE_WEEKLY_TIME" "11:00"
+  ensure_env_var "SCHEDULE_SEND_BITRIX" "1"
+  ensure_env_var "SCHEDULE_SEND_EMAIL" "0"
+
+  if [[ "${INSTALL_CRON:-0}" == "1" ]]; then
+    set_env_var "SCHEDULE_ENABLED" "1"
+  fi
+  chmod 600 "$ENV_FILE"
+}
+
 install_web_service() {
   if [[ "${INSTALL_WEB:-1}" != "1" ]]; then
     echo "[7/8] Web UI service skipped. Re-run with INSTALL_WEB=1 ./setup.sh to install it."
@@ -161,6 +186,7 @@ fi
 
 echo "[5/8] Configuring Web UI"
 configure_web_env
+configure_schedule_env
 
 echo "[6/8] Smoke-checking Python modules"
 "$PYTHON_BIN" -m compileall -q "$BACKEND_DIR/src" "$BACKEND_DIR/tests"
@@ -168,19 +194,11 @@ echo "[6/8] Smoke-checking Python modules"
 install_web_service
 
 if [[ "${INSTALL_CRON:-0}" == "1" ]]; then
-  echo "[8/8] Installing cron jobs"
-  CRON_FILE="$(mktemp)"
-  crontab -l 2>/dev/null > "$CRON_FILE" || true
-  sed -i '/1c_report generate_reports/d' "$CRON_FILE"
-  {
-    echo "0 11 * * * cd $BACKEND_DIR/src && $PYTHON_BIN generate_reports.py --mode daily --send-bitrix >> $BACKEND_DIR/logs/daily.log 2>&1 # 1c_report generate_reports"
-    echo "0 11 * * 5 cd $BACKEND_DIR/src && $PYTHON_BIN generate_reports.py --mode weekly --send-bitrix >> $BACKEND_DIR/logs/weekly.log 2>&1 # 1c_report generate_reports"
-  } >> "$CRON_FILE"
-  crontab "$CRON_FILE"
-  rm -f "$CRON_FILE"
+  echo "[8/8] Installing cron jobs from backend/.env schedule settings"
+  "$PYTHON_BIN" "$BACKEND_DIR/src/scheduler.py"
   $SUDO systemctl enable --now cron >/dev/null 2>&1 || true
 else
-  echo "[8/8] Cron skipped. Re-run with INSTALL_CRON=1 ./setup.sh to install jobs."
+  echo "[8/8] Cron skipped. Configure schedule in Web UI or re-run with INSTALL_CRON=1 ./setup.sh."
 fi
 
 WEB_UI_HOST_VALUE="$(get_env_var WEB_UI_HOST)"
@@ -214,8 +232,10 @@ Next steps:
    cd $BACKEND_DIR/src && ../venv/bin/python generate_reports.py --mode all --date YYYY-MM-DD
 4. Generate one workbook and send it to Bitrix24:
    cd $BACKEND_DIR/src && ../venv/bin/python generate_reports.py --mode all --send-bitrix
-5. Open Web UI:
+5. Generate one workbook and send it by email:
+   cd $BACKEND_DIR/src && ../venv/bin/python generate_reports.py --mode all --send-email
+6. Open Web UI:
    http://$WEB_URL_HOST:$WEB_UI_PORT_VALUE/
-6. Open Web UI settings:
+7. Open Web UI settings:
    http://$WEB_URL_HOST:$WEB_UI_PORT_VALUE/settings
 EOF

@@ -23,26 +23,32 @@ from urllib.parse import parse_qs, quote, urlencode, unquote, urlparse
 
 try:
     from .bitrix_sender import BitrixError
+    from .email_sender import EmailError
     from .generate_reports import (
         OUTPUT_DIR,
         GeneratedReport,
         generate_workbook,
+        send_to_email,
         send_to_bitrix,
     )
     from .excel_reporter import ExcelReporter
     from .metrics import MetricsService
     from .odata_client import ODataError, ODataUnavailableError
+    from .scheduler import ScheduleError, install_from_values as install_schedule
 except ImportError:  # запуск как скрипта из backend/src
     from bitrix_sender import BitrixError
+    from email_sender import EmailError
     from generate_reports import (
         OUTPUT_DIR,
         GeneratedReport,
         generate_workbook,
+        send_to_email,
         send_to_bitrix,
     )
     from excel_reporter import ExcelReporter
     from metrics import MetricsService
     from odata_client import ODataError, ODataUnavailableError
+    from scheduler import ScheduleError, install_from_values as install_schedule
 
 
 APP_TITLE = "Отчёты АТЦ"
@@ -108,6 +114,113 @@ SETTINGS_FIELDS = [
         "key": "BITRIX_DISK_FOLDER_ID",
         "label": "ID папки Диска Bitrix24",
         "section": "Bitrix24",
+    },
+    {
+        "key": "EMAIL_SMTP_HOST",
+        "label": "SMTP сервер",
+        "section": "Email",
+        "help": "Например: smtp.yandex.ru или smtp.gmail.com",
+    },
+    {
+        "key": "EMAIL_SMTP_PORT",
+        "label": "SMTP порт",
+        "section": "Email",
+        "kind": "int",
+        "min": 1,
+        "max": 65535,
+    },
+    {
+        "key": "EMAIL_SMTP_LOGIN",
+        "label": "SMTP логин",
+        "section": "Email",
+        "autocomplete": "username",
+    },
+    {
+        "key": "EMAIL_SMTP_PASSWORD",
+        "label": "SMTP пароль",
+        "section": "Email",
+        "secret": True,
+        "autocomplete": "new-password",
+    },
+    {
+        "key": "EMAIL_FROM",
+        "label": "Email отправителя",
+        "section": "Email",
+    },
+    {
+        "key": "EMAIL_TO",
+        "label": "Получатели",
+        "section": "Email",
+        "help": "Несколько адресов можно разделить запятыми или точками с запятой.",
+    },
+    {
+        "key": "EMAIL_USE_TLS",
+        "label": "Использовать STARTTLS",
+        "section": "Email",
+        "kind": "bool",
+    },
+    {
+        "key": "EMAIL_USE_SSL",
+        "label": "Использовать SMTP SSL",
+        "section": "Email",
+        "kind": "bool",
+    },
+    {
+        "key": "SCHEDULE_ENABLED",
+        "label": "Включить автоматическую генерацию",
+        "section": "Расписание",
+        "kind": "bool",
+    },
+    {
+        "key": "SCHEDULE_DAILY_ENABLED",
+        "label": "Дневной отчёт",
+        "section": "Расписание",
+        "kind": "bool",
+    },
+    {
+        "key": "SCHEDULE_DAILY_TIME",
+        "label": "Время дневного отчёта",
+        "section": "Расписание",
+        "kind": "time",
+    },
+    {
+        "key": "SCHEDULE_WEEKLY_ENABLED",
+        "label": "Недельный отчёт",
+        "section": "Расписание",
+        "kind": "bool",
+    },
+    {
+        "key": "SCHEDULE_WEEKLY_DAY",
+        "label": "День недельного отчёта",
+        "section": "Расписание",
+        "kind": "select",
+        "options": [
+            ("1", "Понедельник"),
+            ("2", "Вторник"),
+            ("3", "Среда"),
+            ("4", "Четверг"),
+            ("5", "Пятница"),
+            ("6", "Суббота"),
+            ("0", "Воскресенье"),
+        ],
+    },
+    {
+        "key": "SCHEDULE_WEEKLY_TIME",
+        "label": "Время недельного отчёта",
+        "section": "Расписание",
+        "kind": "time",
+    },
+    {
+        "key": "SCHEDULE_SEND_BITRIX",
+        "label": "Рассылать в Bitrix24",
+        "section": "Расписание",
+        "kind": "bool",
+    },
+    {
+        "key": "SCHEDULE_SEND_EMAIL",
+        "label": "Рассылать по email",
+        "section": "Расписание",
+        "kind": "bool",
     },
     {
         "key": "WEB_UI_HOST",
@@ -240,7 +353,7 @@ def _reload_runtime_settings(values: dict[str, str]) -> None:
     for key in SETTINGS_KEYS:
         os.environ[key] = values.get(key, "")
 
-    for module_name in ("config", "odata_client", "bitrix_sender"):
+    for module_name in ("config", "odata_client", "bitrix_sender", "email_sender"):
         module = sys.modules.get(module_name) or sys.modules.get(f"{__package__}.{module_name}")
         if module is None:
             continue
@@ -258,6 +371,11 @@ def _validated_settings(form: dict[str, list[str]]) -> tuple[dict[str, str], Opt
 
     for field in SETTINGS_FIELDS:
         key = field["key"]
+        kind = field.get("kind")
+        if kind == "bool":
+            values[key] = "1" if form.get(key, [""])[0] == "1" else "0"
+            continue
+
         raw = form.get(key, [""])[0]
         if "\n" in raw or "\r" in raw:
             return values, f"{field['label']}: переносы строк недопустимы."
@@ -289,6 +407,20 @@ def _validated_settings(form: dict[str, list[str]]) -> tuple[dict[str, str], Opt
             if kind == "port" and numeric in (80, 443):
                 return values, "Web UI не должен занимать порты 80 и 443."
             values[key] = str(numeric)
+        elif kind == "time":
+            if not value:
+                return values, f"{field['label']}: укажите время."
+            parts = value.split(":", 1)
+            if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                return values, f"{field['label']}: время должно быть в формате HH:MM."
+            hour, minute = int(parts[0]), int(parts[1])
+            if hour > 23 or minute > 59:
+                return values, f"{field['label']}: время вне диапазона 00:00..23:59."
+            values[key] = f"{hour:02d}:{minute:02d}"
+        elif kind == "select":
+            allowed = {option[0] for option in field.get("options", [])}
+            if value not in allowed:
+                return values, f"{field['label']}: выберите значение из списка."
 
     return values, None
 
@@ -305,7 +437,36 @@ def _settings_form(values: dict[str, str]) -> str:
             label = html.escape(field["label"])
             help_text = field.get("help", "")
             autocomplete = html.escape(field.get("autocomplete", "off"))
-            if field.get("secret"):
+            kind = field.get("kind")
+            if kind == "bool":
+                checked = " checked" if value.strip().lower() in ("1", "true", "yes", "on") else ""
+                controls.append(
+                    f"""
+                    <label class="check">
+                      <input type="checkbox" name="{key}" value="1"{checked}>
+                      <span>{label}</span>
+                    </label>
+                    {f'<p class="hint">{html.escape(help_text)}</p>' if help_text else ''}
+                    """
+                )
+            elif kind == "select":
+                options = []
+                for option_value, option_label in field.get("options", []):
+                    selected = " selected" if option_value == value else ""
+                    options.append(
+                        f'<option value="{html.escape(option_value, quote=True)}"{selected}>'
+                        f'{html.escape(option_label)}</option>'
+                    )
+                controls.append(
+                    f"""
+                    <div class="field">
+                      <label class="title" for="{key}">{label}</label>
+                      <select id="{key}" name="{key}">{''.join(options)}</select>
+                      {f'<p class="hint">{html.escape(help_text)}</p>' if help_text else ''}
+                    </div>
+                    """
+                )
+            elif field.get("secret"):
                 status = html.escape(_setting_status(value))
                 controls.append(
                     f"""
@@ -326,9 +487,9 @@ def _settings_form(values: dict[str, str]) -> str:
                     """
                 )
             else:
-                input_type = "number" if field.get("kind") in ("int", "port") else "text"
+                input_type = "number" if kind in ("int", "port") else "time" if kind == "time" else "text"
                 extra = ""
-                if field.get("kind") in ("int", "port"):
+                if kind in ("int", "port"):
                     extra = (
                         f' min="{int(field.get("min", 1))}"'
                         f' max="{int(field.get("max", 65535))}"'
@@ -373,6 +534,7 @@ def _page(
     selected_mode: str = "all",
     selected_date: Optional[date] = None,
     send_bitrix: bool = False,
+    send_email: bool = False,
     message: str = "",
     error: str = "",
     generated: Optional[list[GeneratedReport]] = None,
@@ -423,6 +585,7 @@ def _page(
     recent_html = "".join(recent_items) or "<li><span></span><em>Нет файлов</em></li>"
 
     bitrix_checked = " checked" if send_bitrix else ""
+    email_checked = " checked" if send_email else ""
     message_html = f'<div class="notice ok">{html.escape(message)}</div>' if message else ""
     error_html = f'<div class="notice err">{html.escape(error)}</div>' if error else ""
 
@@ -514,7 +677,7 @@ def _page(
       font-size: 13px;
       color: #30363c;
     }}
-    input[type="date"], input[type="text"], input[type="password"], input[type="number"] {{
+    input[type="date"], input[type="text"], input[type="password"], input[type="number"], input[type="time"], select {{
       width: 100%;
       min-height: 42px;
       border: 1px solid var(--line);
@@ -748,6 +911,10 @@ def _page(
             <input type="checkbox" name="send_bitrix" value="1"{bitrix_checked}>
             <span>Отправить в Bitrix24</span>
           </label>
+          <label class="check">
+            <input type="checkbox" name="send_email" value="1"{email_checked}>
+            <span>Отправить по email</span>
+          </label>
           <div class="actions">
             <button type="submit">Сформировать</button>
           </div>
@@ -844,7 +1011,7 @@ def _settings_page(message: str = "", error: str = "") -> str:
       font-size: 13px;
       color: #30363c;
     }}
-    input[type="date"], input[type="text"], input[type="password"], input[type="number"] {{
+    input[type="date"], input[type="text"], input[type="password"], input[type="number"], input[type="time"], select {{
       width: 100%;
       min-height: 42px;
       border: 1px solid var(--line);
@@ -1000,6 +1167,16 @@ def _settings_page(message: str = "", error: str = "") -> str:
 </html>"""
 
 
+def _apply_schedule(values: dict[str, str]) -> str:
+    try:
+        entries = install_schedule(values)
+    except (ScheduleError, OSError) as exc:
+        return f"Расписание не обновлено: {exc}"
+    if entries:
+        return f"Расписание обновлено: {len(entries)} задач."
+    return "Расписание выключено, задачи cron удалены."
+
+
 def _reports_from_query(params: dict[str, list[str]]) -> list[GeneratedReport]:
     reports: list[GeneratedReport] = []
     for filename in params.get("file", []):
@@ -1066,6 +1243,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         mode: str = "all",
         report_date: Optional[date] = None,
         send_bitrix: bool = False,
+        send_email: bool = False,
         message: str = "",
         error: str = "",
         generated: Optional[list[GeneratedReport]] = None,
@@ -1073,6 +1251,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         query: dict[str, object] = {
             "mode": mode,
             "send_bitrix": "1" if send_bitrix else "0",
+            "send_email": "1" if send_email else "0",
         }
         if report_date is not None:
             query["date"] = report_date.isoformat()
@@ -1105,6 +1284,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                 selected_mode=selected_mode,
                 selected_date=selected_date,
                 send_bitrix=send_bitrix,
+                send_email=False,
                 error=error,
             ),
             HTTPStatus.BAD_REQUEST,
@@ -1128,6 +1308,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                     selected_mode=mode,
                     selected_date=selected_date,
                     send_bitrix=params.get("send_bitrix", [""])[0] == "1",
+                    send_email=params.get("send_email", [""])[0] == "1",
                     message=params.get("message", [""])[0],
                     error=params.get("error", [""])[0],
                     generated=_reports_from_query(params),
@@ -1206,7 +1387,8 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._redirect(self._settings_location(error=f"Не удалось сохранить backend/.env: {exc}"))
             return
-        self._redirect(self._settings_location(message="Настройки сохранены."))
+        schedule_message = _apply_schedule(values)
+        self._redirect(self._settings_location(message=f"Настройки сохранены. {schedule_message}"))
 
     def _generate_report(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1215,12 +1397,14 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         mode = form.get("mode", ["all"])[0]
         date_raw = form.get("date", [""])[0]
         send_bitrix = form.get("send_bitrix", [""])[0] == "1"
+        send_email = form.get("send_email", [""])[0] == "1"
 
         if mode not in MODES:
             self._redirect(
                 self._report_location(
                     mode="all",
                     send_bitrix=send_bitrix,
+                    send_email=send_email,
                     error="Неизвестный режим отчёта.",
                 )
             )
@@ -1232,6 +1416,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                 self._report_location(
                     mode=mode,
                     send_bitrix=send_bitrix,
+                    send_email=send_email,
                     error="Дата должна быть в формате YYYY-MM-DD.",
                 )
             )
@@ -1248,34 +1433,44 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             generated = generate_workbook(service, reporter, mode, daily_day, weekly_day)
             if send_bitrix:
                 send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+            if send_email:
+                send_to_email(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
         except ODataUnavailableError as exc:
             self._redirect(
                 self._report_location(
                     mode=mode,
                     report_date=report_date,
                     send_bitrix=send_bitrix,
+                    send_email=send_email,
                     error=f"OData недоступен: {exc}",
                 )
             )
             return
-        except (ODataError, BitrixError, RuntimeError) as exc:
+        except (ODataError, BitrixError, EmailError, RuntimeError) as exc:
             self._redirect(
                 self._report_location(
                     mode=mode,
                     report_date=report_date,
                     send_bitrix=send_bitrix,
+                    send_email=send_email,
                     error=str(exc),
                 )
             )
             return
 
         elapsed = time.monotonic() - started
-        suffix = " Отправлено в Bitrix24." if send_bitrix else ""
+        channels = []
+        if send_bitrix:
+            channels.append("Bitrix24")
+        if send_email:
+            channels.append("email")
+        suffix = f" Отправлено: {', '.join(channels)}." if channels else ""
         self._redirect(
             self._report_location(
                 mode=mode,
                 report_date=report_date,
                 send_bitrix=send_bitrix,
+                send_email=send_email,
                 message=f"Отчёт сформирован за {elapsed:.1f} сек.{suffix}",
                 generated=generated,
             )

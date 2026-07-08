@@ -2,7 +2,7 @@
 
 Создаёт один Excel-файл на базе шаблона: каждый отчёт заполняется на своём
 листе, как в `templates/report_template.xlsx`.
-Опционально отправляет созданный файл в чат Bitrix24.
+Опционально отправляет созданный файл в чат Bitrix24 и/или по email.
 """
 from __future__ import annotations
 
@@ -14,11 +14,13 @@ from pathlib import Path
 
 try:
     from .bitrix_sender import BitrixSender, BitrixError
+    from .email_sender import EmailSender, EmailError
     from .excel_reporter import ExcelReporter
     from .metrics import MetricsService
     from .odata_client import ODataError, ODataUnavailableError
 except ImportError:  # запуск как скрипта из backend/src
     from bitrix_sender import BitrixSender, BitrixError
+    from email_sender import EmailSender, EmailError
     from excel_reporter import ExcelReporter
     from metrics import MetricsService
     from odata_client import ODataError, ODataUnavailableError
@@ -126,6 +128,14 @@ def send_to_bitrix(reports: list[GeneratedReport], title: str) -> None:
     sender.send_files([r.path for r in reports], title)
 
 
+def send_to_email(reports: list[GeneratedReport], title: str) -> None:
+    sender = EmailSender()
+    files = [r.path for r in reports]
+    names = "\n".join(f"- {path.name}" for path in files)
+    body = f"{title}\n\nВо вложении:\n{names}"
+    sender.send_files(files, title, body)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Генерация Excel-отчётов АТЦ")
     parser.add_argument(
@@ -144,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--send-bitrix",
         action="store_true",
         help="отправить созданный файл в чат Bitrix24",
+    )
+    parser.add_argument(
+        "--send-email",
+        action="store_true",
+        help="отправить созданный файл по SMTP email",
     )
     return parser
 
@@ -175,6 +190,14 @@ def main(argv: list[str] | None = None) -> int:
         except BitrixError as exc:
             print(f"Ошибка Bitrix24: {exc}", file=sys.stderr)
             return 4
+
+    if args.send_email:
+        try:
+            send_to_email(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+            print("[OK] Отправлено по email")
+        except EmailError as exc:
+            print(f"Ошибка email: {exc}", file=sys.stderr)
+            return 5
 
     return 0
 

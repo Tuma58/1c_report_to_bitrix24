@@ -59,6 +59,12 @@ cd /opt/1c_report/backend && ./venv/bin/python src/smoke_test.py
 cd /opt/1c_report/backend/src && ../venv/bin/python generate_reports.py --mode all --date YYYY-MM-DD
 ```
 
+В web-интерфейсе созданные книги можно открыть как HTML-страницы отчёта:
+
+```text
+http://<ip-vps>:8080/view?file=<имя-файла.xlsx>
+```
+
 Сформировать книгу и отправить в Bitrix24:
 
 ```bash

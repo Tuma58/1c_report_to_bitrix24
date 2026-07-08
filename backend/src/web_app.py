@@ -10,6 +10,7 @@ import base64
 import argparse
 import html
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -20,6 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, quote, urlencode, unquote, urlparse
+
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 try:
     from .bitrix_sender import BitrixError
@@ -272,6 +276,25 @@ def _default_date() -> date:
 
 def _file_url(path: Path) -> str:
     return f"/download?file={quote(path.name)}"
+
+
+def _view_url(path: Path, sheet: str = "") -> str:
+    query = {"file": path.name}
+    if sheet:
+        query["sheet"] = sheet
+    return f"/view?{urlencode(query)}"
+
+
+def _safe_output_path(filename: str) -> Optional[Path]:
+    if not filename or "/" in filename or "\\" in filename or not filename.endswith(".xlsx"):
+        return None
+    path = (OUTPUT_DIR / filename).resolve()
+    try:
+        if OUTPUT_DIR.resolve() not in path.parents:
+            return None
+    except OSError:
+        return None
+    return path if path.exists() else None
 
 
 def _recent_reports(limit: int = 10) -> list[Path]:
@@ -529,6 +552,341 @@ def _settings_form(values: dict[str, str]) -> str:
     """
 
 
+def _color_hex(color, default: str = "") -> str:
+    if not color or color.type != "rgb" or not color.rgb:
+        return default
+    raw = str(color.rgb)
+    if len(raw) == 8:
+        raw = raw[2:]
+    return f"#{raw}" if len(raw) == 6 else default
+
+
+def _merged_map(ws) -> tuple[dict[tuple[int, int], tuple[int, int]], set[tuple[int, int]]]:
+    tops: dict[tuple[int, int], tuple[int, int]] = {}
+    covered: set[tuple[int, int]] = set()
+    for merged in ws.merged_cells.ranges:
+        tops[(merged.min_row, merged.min_col)] = (
+            merged.max_row - merged.min_row + 1,
+            merged.max_col - merged.min_col + 1,
+        )
+        for row in range(merged.min_row, merged.max_row + 1):
+            for col in range(merged.min_col, merged.max_col + 1):
+                if (row, col) != (merged.min_row, merged.min_col):
+                    covered.add((row, col))
+    return tops, covered
+
+
+def _numeric_cell(ws, coord: str, cache: dict[str, object]) -> Optional[float]:
+    value = _display_cell_value(ws, coord, cache)
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(" ", "").replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _display_cell_value(ws, coord: str, cache: dict[str, object]):
+    if coord in cache:
+        return cache[coord]
+    value = ws[coord].value
+    if not isinstance(value, str) or not value.startswith("="):
+        cache[coord] = value
+        return value
+
+    formula = value.replace(" ", "")
+    result = None
+
+    sum_match = re.fullmatch(r"=SUM\(([A-Z]+\d+):([A-Z]+\d+)\)", formula)
+    if sum_match:
+        start, end = sum_match.groups()
+        start_col = re.match(r"([A-Z]+)", start).group(1)
+        start_row = int(re.search(r"(\d+)", start).group(1))
+        end_row = int(re.search(r"(\d+)", end).group(1))
+        total = 0.0
+        for row in range(start_row, end_row + 1):
+            total += _numeric_cell(ws, f"{start_col}{row}", cache) or 0.0
+        result = total
+
+    if result is None:
+        math_match = re.fullmatch(r'=IFERROR\(([A-Z]+\d+)([-/])([A-Z]+\d+),"—"\)', formula)
+        if math_match:
+            left_ref, op, right_ref = math_match.groups()
+            left = _numeric_cell(ws, left_ref, cache)
+            right = _numeric_cell(ws, right_ref, cache)
+            if left is not None and right is not None:
+                if op == "-":
+                    result = left - right
+                elif right != 0:
+                    result = left / right
+
+    if result is None:
+        ratio_match = re.fullmatch(
+            r'=IFERROR\(IF\(AND\(ISNUMBER\(([A-Z]+\d+)\),ISNUMBER\(([A-Z]+\d+)\),'
+            r'([A-Z]+\d+)>0\),([A-Z]+\d+)/([A-Z]+\d+),"—"\),"—"\)',
+            formula,
+        )
+        if ratio_match:
+            plan_ref, fact_ref, positive_ref, numerator_ref, denominator_ref = ratio_match.groups()
+            plan = _numeric_cell(ws, plan_ref, cache)
+            fact = _numeric_cell(ws, fact_ref, cache)
+            positive = _numeric_cell(ws, positive_ref, cache)
+            numerator = _numeric_cell(ws, numerator_ref, cache)
+            denominator = _numeric_cell(ws, denominator_ref, cache)
+            if (
+                plan is not None
+                and fact is not None
+                and positive is not None
+                and positive > 0
+                and numerator is not None
+                and denominator not in (None, 0)
+            ):
+                result = numerator / denominator
+
+    cache[coord] = result if result is not None else "—"
+    return cache[coord]
+
+
+def _format_report_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if abs(value) >= 100:
+            return f"{value:,.0f}".replace(",", " ")
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _cell_style(cell, row_height: Optional[float]) -> str:
+    styles: list[str] = []
+    fill = _color_hex(cell.fill.fgColor if cell.fill else None)
+    if fill:
+        styles.append(f"background:{fill}")
+    color = _color_hex(cell.font.color if cell.font else None)
+    if color:
+        styles.append(f"color:{color}")
+    if cell.font:
+        if cell.font.bold:
+            styles.append("font-weight:700")
+        if cell.font.italic:
+            styles.append("font-style:italic")
+        if cell.font.sz:
+            styles.append(f"font-size:{float(cell.font.sz):.1f}pt")
+    if cell.alignment:
+        if cell.alignment.horizontal:
+            styles.append(f"text-align:{cell.alignment.horizontal}")
+        if cell.alignment.vertical:
+            styles.append(f"vertical-align:{cell.alignment.vertical}")
+    if row_height:
+        styles.append(f"height:{int(row_height * 1.35)}px")
+    return ";".join(styles)
+
+
+def _render_sheet_table(ws) -> str:
+    tops, covered = _merged_map(ws)
+    cache: dict[str, object] = {}
+    colgroup = []
+    for col in range(1, min(ws.max_column, 9) + 1):
+        letter = get_column_letter(col)
+        width = ws.column_dimensions[letter].width or 10
+        colgroup.append(f'<col style="width:{max(18, int(width * 7.5))}px">')
+
+    rows = []
+    for row_idx in range(1, ws.max_row + 1):
+        cells = []
+        for col_idx in range(1, min(ws.max_column, 9) + 1):
+            if (row_idx, col_idx) in covered:
+                continue
+            cell = ws.cell(row_idx, col_idx)
+            rowspan, colspan = tops.get((row_idx, col_idx), (1, 1))
+            attrs = []
+            if rowspan > 1:
+                attrs.append(f'rowspan="{rowspan}"')
+            if colspan > 1:
+                attrs.append(f'colspan="{colspan}"')
+            style = _cell_style(cell, ws.row_dimensions[row_idx].height)
+            if style:
+                attrs.append(f'style="{html.escape(style, quote=True)}"')
+            value = _display_cell_value(ws, cell.coordinate, cache)
+            text = html.escape(_format_report_value(value))
+            cells.append(f"<td {' '.join(attrs)}>{text}</td>")
+        rows.append(f"<tr>{''.join(cells)}</tr>")
+    return f"<table class=\"report-table\"><colgroup>{''.join(colgroup)}</colgroup>{''.join(rows)}</table>"
+
+
+def _report_view_page(path: Path, sheet_name: str = "") -> str:
+    wb = load_workbook(path, data_only=False)
+    selected = sheet_name if sheet_name in wb.sheetnames else wb.sheetnames[0]
+    ws = wb[selected]
+    tabs = []
+    for name in wb.sheetnames:
+        cls = " active" if name == selected else ""
+        tabs.append(
+            f'<a class="sheet-tab{cls}" href="{html.escape(_view_url(path, name), quote=True)}">'
+            f"{html.escape(name)}</a>"
+        )
+    table = _render_sheet_table(ws)
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{APP_TITLE} · {html.escape(selected)}</title>
+  <style>
+    :root {{
+      --bg: #f6f7f8;
+      --panel: #ffffff;
+      --text: #202428;
+      --muted: #687079;
+      --line: #d9dee3;
+      --accent: #167c80;
+      --accent-dark: #0f5e61;
+      --shadow: 0 10px 28px rgba(32, 36, 40, .08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    header {{
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }}
+    .wrap {{
+      width: min(1280px, calc(100% - 32px));
+      margin: 0 auto;
+    }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 64px;
+      gap: 16px;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }}
+    nav {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+    }}
+    nav a, .button {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      color: var(--accent-dark);
+      text-decoration: none;
+      font-weight: 600;
+      border: 1px solid transparent;
+      background: transparent;
+    }}
+    nav a:hover, .button:hover {{ background: #eef3f3; }}
+    main {{ padding: 22px 0 40px; }}
+    .toolbar {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }}
+    .file-name {{
+      color: var(--muted);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }}
+    .tabs {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 16px;
+    }}
+    .sheet-tab {{
+      display: inline-flex;
+      min-height: 34px;
+      align-items: center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--accent-dark);
+      background: #fff;
+      text-decoration: none;
+      font-weight: 600;
+    }}
+    .sheet-tab.active {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }}
+    .report-scroll {{
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }}
+    .report-table {{
+      border-collapse: collapse;
+      table-layout: fixed;
+      min-width: 980px;
+      background: #fff;
+    }}
+    .report-table td {{
+      border: 1px solid #b7c9d6;
+      padding: 7px 8px;
+      min-height: 24px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: Arial, sans-serif;
+      line-height: 1.28;
+    }}
+    @media (max-width: 760px) {{
+      .topbar {{ align-items: flex-start; flex-direction: column; padding: 14px 0; }}
+      nav {{ justify-content: flex-start; }}
+      .toolbar {{ align-items: flex-start; flex-direction: column; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <h1>{APP_TITLE}</h1>
+      <nav aria-label="Разделы">
+        <a href="/">Отчёт</a>
+        <a href="/settings">Настройки</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <div class="toolbar">
+      <div>
+        <strong>{html.escape(selected)}</strong>
+        <div class="file-name">{html.escape(path.name)}</div>
+      </div>
+      <div>
+        <a class="button" href="{html.escape(_file_url(path), quote=True)}">Скачать Excel</a>
+        <a class="button" href="/">К генерации</a>
+      </div>
+    </div>
+    <div class="tabs">{''.join(tabs)}</div>
+    <div class="report-scroll">{table}</div>
+  </main>
+</body>
+</html>"""
+
+
 def _page(
     *,
     selected_mode: str = "all",
@@ -561,7 +919,10 @@ def _page(
                 f"""
                 <li>
                   <span>{html.escape(report.kind)}</span>
-                  <a href="{_file_url(report.path)}">{name}</a>
+                  <div class="file-row">
+                    <a href="{_view_url(report.path)}">{name}</a>
+                    <small><a href="{_view_url(report.path)}">Открыть</a> · <a href="{_file_url(report.path)}">Скачать</a></small>
+                  </div>
                 </li>
                 """
             )
@@ -578,7 +939,10 @@ def _page(
             f"""
             <li>
               <span>{html.escape(_fmt_mtime(path))}</span>
-              <a href="{_file_url(path)}">{html.escape(path.name)}</a>
+              <div class="file-row">
+                <a href="{_view_url(path)}">{html.escape(path.name)}</a>
+                <small><a href="{_view_url(path)}">Открыть</a> · <a href="{_file_url(path)}">Скачать</a></small>
+              </div>
             </li>
             """
         )
@@ -864,6 +1228,15 @@ def _page(
       color: var(--muted);
       font-size: 13px;
       font-style: normal;
+    }}
+    .file-row {{
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }}
+    .file-row small {{
+      color: var(--muted);
+      font-size: 12px;
     }}
     a {{
       color: var(--accent-dark);
@@ -1180,10 +1553,8 @@ def _apply_schedule(values: dict[str, str]) -> str:
 def _reports_from_query(params: dict[str, list[str]]) -> list[GeneratedReport]:
     reports: list[GeneratedReport] = []
     for filename in params.get("file", []):
-        if not filename or "/" in filename or "\\" in filename or not filename.endswith(".xlsx"):
-            continue
-        path = (OUTPUT_DIR / filename).resolve()
-        if OUTPUT_DIR.resolve() in path.parents and path.exists():
+        path = _safe_output_path(filename)
+        if path is not None:
             reports.append(GeneratedReport("Файл", filename, path))
     return reports
 
@@ -1324,6 +1695,9 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                 )
             )
             return
+        if parsed.path == "/view":
+            self._view_report(parsed.query)
+            return
         if parsed.path == "/download":
             self._download(parsed.query)
             return
@@ -1351,6 +1725,11 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return
+        if parsed.path == "/view":
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             return
         if parsed.path == "/health":
@@ -1479,11 +1858,8 @@ class ReportWebHandler(BaseHTTPRequestHandler):
     def _download(self, query: str) -> None:
         params = parse_qs(query)
         filename = unquote(params.get("file", [""])[0])
-        if not filename or "/" in filename or "\\" in filename or not filename.endswith(".xlsx"):
-            self.send_error(HTTPStatus.BAD_REQUEST)
-            return
-        path = (OUTPUT_DIR / filename).resolve()
-        if OUTPUT_DIR.resolve() not in path.parents or not path.exists():
+        path = _safe_output_path(filename)
+        if path is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         data = path.read_bytes()
@@ -1499,6 +1875,22 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         )
         self.end_headers()
         self.wfile.write(data)
+
+    def _view_report(self, query: str) -> None:
+        params = parse_qs(query)
+        filename = unquote(params.get("file", [""])[0])
+        path = _safe_output_path(filename)
+        if path is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        sheet_name = params.get("sheet", [""])[0]
+        try:
+            self._send_html(_report_view_page(path, sheet_name))
+        except (OSError, ValueError) as exc:
+            self._send_html(
+                _page(error=f"Не удалось открыть книгу для просмотра: {exc}"),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))

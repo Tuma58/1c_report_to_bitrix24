@@ -113,19 +113,14 @@ SETTINGS_FIELDS = [
         "label": "Webhook Bitrix24",
         "section": "Bitrix24",
         "secret": True,
-        "help": "URL вида https://portal.bitrix24.ru/rest/<user>/<token>/",
+        "help": "URL вида https://portal.bitrix24.ru/rest/<user>/<token>/ с правами im и disk.",
         "autocomplete": "off",
     },
     {
         "key": "BITRIX_CHAT_ID",
         "label": "ID чата Bitrix24",
         "section": "Bitrix24",
-        "help": "Например: chat123",
-    },
-    {
-        "key": "BITRIX_DISK_FOLDER_ID",
-        "label": "ID папки Диска Bitrix24",
-        "section": "Bitrix24",
+        "help": "Например: chat226489 из ссылки /online/?IM_DIALOG=chat226489.",
     },
     {
         "key": "EMAIL_SMTP_HOST",

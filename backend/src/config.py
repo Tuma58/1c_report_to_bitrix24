@@ -31,7 +31,6 @@ class Settings:
     retries: int
     bitrix_webhook_url: str
     bitrix_chat_id: str
-    bitrix_disk_folder_id: str
     email_smtp_host: str
     email_smtp_port: int
     email_smtp_login: str
@@ -54,7 +53,6 @@ class Settings:
             retries=_get_int("ODATA_RETRIES", 3),
             bitrix_webhook_url=os.getenv("BITRIX_WEBHOOK_URL", "").strip(),
             bitrix_chat_id=os.getenv("BITRIX_CHAT_ID", "").strip(),
-            bitrix_disk_folder_id=os.getenv("BITRIX_DISK_FOLDER_ID", "").strip(),
             email_smtp_host=os.getenv("EMAIL_SMTP_HOST", "").strip(),
             email_smtp_port=_get_int("EMAIL_SMTP_PORT", 587),
             email_smtp_login=os.getenv("EMAIL_SMTP_LOGIN", "").strip(),

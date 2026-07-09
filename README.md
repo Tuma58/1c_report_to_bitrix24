@@ -33,9 +33,8 @@ nano /opt/1c_report/backend/.env
 - `ODATA_BASE_URL` — URL опубликованной базы 1С OData.
 - `ODATA_LOGIN` — логин read-only пользователя 1С.
 - `ODATA_PASSWORD` — пароль пользователя 1С.
-- `BITRIX_WEBHOOK_URL` — входящий REST webhook Bitrix24.
-- `BITRIX_CHAT_ID` — ID чата Bitrix24.
-- `BITRIX_DISK_FOLDER_ID` — ID папки Диска для загрузки книги.
+- `BITRIX_WEBHOOK_URL` — входящий REST webhook Bitrix24 с правами `im` и `disk`.
+- `BITRIX_CHAT_ID` — ID чата Bitrix24, например `chat226489`.
 - `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_LOGIN`, `EMAIL_SMTP_PASSWORD` — SMTP-доступ для email-рассылки.
 - `EMAIL_FROM`, `EMAIL_TO` — отправитель и получатели email.
 - `SCHEDULE_*` — расписание автоматической генерации и каналы рассылки.

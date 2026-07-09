@@ -80,7 +80,6 @@ ODATA_TIMEOUT=30
 ODATA_RETRIES=3
 BITRIX_WEBHOOK_URL=
 BITRIX_CHAT_ID=
-BITRIX_DISK_FOLDER_ID=
 EMAIL_SMTP_HOST=
 EMAIL_SMTP_PORT=587
 EMAIL_SMTP_LOGIN=
@@ -269,12 +268,12 @@ Web-сервер использует `ThreadingHTTPServer` и может при
 Отправка использует входящий REST webhook:
 
 - `BITRIX_WEBHOOK_URL` — URL вида `https://portal.bitrix24.ru/rest/<user>/<token>/`;
-- `BITRIX_CHAT_ID` — диалог/чат, например `chat123`;
-- `BITRIX_DISK_FOLDER_ID` — ID папки Диска Bitrix24 для загрузки `.xlsx`.
+- webhook должен иметь права `im` и `disk`;
+- `BITRIX_CHAT_ID` — диалог/чат, например `chat226489`.
 
-Файл загружается в указанную папку Диска, затем в чат отправляется сообщение
-со ссылкой на созданную таблицу. Без `BITRIX_DISK_FOLDER_ID` отправка файла
-завершится ошибкой, чтобы не имитировать успешную доставку.
+Файл отправляется прямо вложением в чат. Технически Bitrix24 создаёт IM-папку
+диалога и хранит вложение там; отдельный `BITRIX_DISK_FOLDER_ID` больше не
+нужен.
 
 ## Email
 
@@ -327,7 +326,7 @@ backend/
     repositories.py    чтение заказ-нарядов, регистров, планов, оплат
     metrics.py         расчёт дневных/недельных/спец. метрик
     excel_reporter.py  заполнение Excel-шаблона
-    bitrix_sender.py   отправка ссылок на xlsx в чат Bitrix24
+    bitrix_sender.py   отправка xlsx вложением в чат Bitrix24
     email_sender.py    отправка xlsx вложением по SMTP
     generate_reports.py единый CLI создания всех форм
     web_app.py          web-интерфейс настройки отчёта

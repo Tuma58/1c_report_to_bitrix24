@@ -1,12 +1,14 @@
 """Отправка созданных отчётов в чат Bitrix24 через REST webhook.
 
-Файлы загружаются в папку Диска Bitrix24 (`BITRIX_DISK_FOLDER_ID`), после чего
-в чат отправляется сообщение со ссылками на загруженные xlsx. Такой вариант
-не требует публичного URL на VPS.
+Файлы отправляются как вложения самого чата: сначала берётся IM-папка диалога,
+затем xlsx загружается в неё и прикрепляется к сообщению через im.disk.file.commit.
+Публичный URL на VPS и отдельная папка общего Диска для этого не нужны.
 """
 from __future__ import annotations
 
 import base64
+import secrets
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -27,7 +29,6 @@ class BitrixSender:
         self.settings = config or default_settings
         self.webhook_url = self.settings.bitrix_webhook_url.rstrip("/")
         self.chat_id = self.settings.bitrix_chat_id
-        self.disk_folder_id = self.settings.bitrix_disk_folder_id
         if not self.webhook_url:
             raise BitrixError("BITRIX_WEBHOOK_URL не задан в .env")
         if not self.chat_id:
@@ -65,42 +66,50 @@ class BitrixSender:
             },
         )
 
-    def upload_file(self, path: Path) -> dict:
-        """Загружает файл в папку Диска Bitrix24 и возвращает result."""
-        if not self.disk_folder_id:
-            raise BitrixError(
-                "BITRIX_DISK_FOLDER_ID не задан: без папки Диска нельзя "
-                "загрузить xlsx и отправить ссылку в чат."
-            )
+    def _chat_folder_id(self) -> int:
+        data = self._post("im.disk.folder.get", {"DIALOG_ID": self.chat_id})
+        result = data.get("result")
+        if not isinstance(result, dict) or not result.get("ID"):
+            raise BitrixError("Bitrix24 не вернул ID папки чата")
+        return int(result["ID"])
 
+    @staticmethod
+    def _unique_chat_filename(path: Path) -> str:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = secrets.token_hex(2)
+        return f"{path.stem}_{stamp}_{suffix}{path.suffix}"
+
+    def upload_file(self, path: Path) -> dict:
+        """Загружает файл в IM-папку чата и возвращает result."""
         file_path = Path(path)
+        folder_id = self._chat_folder_id()
         content = base64.b64encode(file_path.read_bytes()).decode("ascii")
         data = self._post(
             "disk.folder.uploadfile",
             {
-                "id": self.disk_folder_id,
-                "data": {"NAME": file_path.name},
+                "id": folder_id,
+                "data": {"NAME": self._unique_chat_filename(file_path)},
                 "fileContent": content,
             },
         )
         return data.get("result", {})
 
-    @staticmethod
-    def _file_url(upload_result: dict) -> str:
-        for key in ("DETAIL_URL", "DOWNLOAD_URL", "VIEW_URL"):
-            value = upload_result.get(key)
-            if value:
-                return str(value)
-        return ""
+    def _commit_file(self, upload_result: dict, message: str) -> dict:
+        file_id = upload_result.get("ID")
+        if not file_id:
+            raise BitrixError("Bitrix24 не вернул ID загруженного файла")
+        return self._post(
+            "im.disk.file.commit",
+            {
+                "DIALOG_ID": self.chat_id,
+                "FILE_ID": int(file_id),
+                "MESSAGE": message,
+            },
+        )
 
     def send_files(self, files: Iterable[Path], title: str) -> None:
-        """Загружает файлы на Диск и отправляет в чат сообщение со ссылками."""
-        uploaded: list[tuple[Path, str]] = []
-        for file_path in files:
+        """Отправляет файлы в чат как вложения."""
+        for index, file_path in enumerate(files):
             result = self.upload_file(Path(file_path))
-            uploaded.append((Path(file_path), self._file_url(result)))
-
-        lines = [title, ""]
-        for file_path, url in uploaded:
-            lines.append(f"- {file_path.name}: {url or 'загружено в Диск'}")
-        self.send_message("\n".join(lines))
+            message = title if index == 0 else ""
+            self._commit_file(result, message)

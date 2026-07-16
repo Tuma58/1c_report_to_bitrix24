@@ -627,6 +627,8 @@ def weekly_shop(self, report_name: str, any_date: date) -> ShopWeeklyMetrics:
     monthly = self.plan.monthly_values(division_key, any_date)
     plan_normhours = self._plan_week(monthly, "нормочасы", any_date)
     plan_output_master = self._plan_week(monthly, "выработка_на_мастера", any_date)
+    if report_name == "ЦКР" and plan_output_master is not None:
+        plan_output_master *= 7.0
     plan_revenue = self._plan_week(monthly, "выручка", any_date)
     avg_check_code = plan_code("средний_чек")
     avg_check = monthly.get(avg_check_code) if avg_check_code else None

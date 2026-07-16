@@ -786,13 +786,15 @@ def _display_cell_value(ws, coord: str, cache: dict[str, object]):
     return cache[coord]
 
 
-def _format_report_value(value) -> str:
+def _format_report_value(value, number_format: str = "") -> str:
     if value is None:
         return ""
-    if isinstance(value, float):
+    if isinstance(value, (int, float)):
+        if "%" in number_format:
+            return f"{float(value) * 100:.2f}%"
         if abs(value) >= 100:
             return f"{value:,.0f}".replace(",", " ")
-        return f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{float(value):.2f}".rstrip("0").rstrip(".")
     return str(value)
 
 
@@ -827,13 +829,20 @@ def _render_sheet_table(ws) -> str:
     colgroup = []
     for col in range(1, min(ws.max_column, 9) + 1):
         letter = get_column_letter(col)
+        if ws.column_dimensions[letter].hidden:
+            continue
         width = ws.column_dimensions[letter].width or 10
         colgroup.append(f'<col style="width:{max(18, int(width * 7.5))}px">')
 
     rows = []
     for row_idx in range(1, ws.max_row + 1):
+        if ws.row_dimensions[row_idx].hidden:
+            continue
         cells = []
         for col_idx in range(1, min(ws.max_column, 9) + 1):
+            letter = get_column_letter(col_idx)
+            if ws.column_dimensions[letter].hidden:
+                continue
             if (row_idx, col_idx) in covered:
                 continue
             cell = ws.cell(row_idx, col_idx)
@@ -847,7 +856,7 @@ def _render_sheet_table(ws) -> str:
             if style:
                 attrs.append(f'style="{html.escape(style, quote=True)}"')
             value = _display_cell_value(ws, cell.coordinate, cache)
-            text = html.escape(_format_report_value(value))
+            text = html.escape(_format_report_value(value, cell.number_format))
             cells.append(f"<td {' '.join(attrs)}>{text}</td>")
         rows.append(f"<tr>{''.join(cells)}</tr>")
     return f"<table class=\"report-table\"><colgroup>{''.join(colgroup)}</colgroup>{''.join(rows)}</table>"
@@ -855,11 +864,14 @@ def _render_sheet_table(ws) -> str:
 
 def _report_view_page(path: Path, sheet_name: str = "", message: str = "", error: str = "") -> str:
     wb = load_workbook(path, data_only=False)
-    selected = sheet_name if sheet_name in wb.sheetnames else wb.sheetnames[0]
+    visible_sheets = [name for name in wb.sheetnames if wb[name].sheet_state == "visible"]
+    if not visible_sheets:
+        visible_sheets = wb.sheetnames
+    selected = sheet_name if sheet_name in visible_sheets else visible_sheets[0]
     ws = wb[selected]
-    selected_index = wb.sheetnames.index(selected)
-    prev_sheet = wb.sheetnames[selected_index - 1] if selected_index > 0 else ""
-    next_sheet = wb.sheetnames[selected_index + 1] if selected_index < len(wb.sheetnames) - 1 else ""
+    selected_index = visible_sheets.index(selected)
+    prev_sheet = visible_sheets[selected_index - 1] if selected_index > 0 else ""
+    next_sheet = visible_sheets[selected_index + 1] if selected_index < len(visible_sheets) - 1 else ""
     prev_button = (
         f'<a class="button" href="{html.escape(_view_url(path, prev_sheet), quote=True)}">Назад</a>'
         if prev_sheet
@@ -873,7 +885,7 @@ def _report_view_page(path: Path, sheet_name: str = "", message: str = "", error
     message_html = f'<div class="notice ok">{html.escape(message)}</div>' if message else ""
     error_html = f'<div class="notice err">{html.escape(error)}</div>' if error else ""
     tabs = []
-    for name in wb.sheetnames:
+    for name in visible_sheets:
         cls = " active" if name == selected else ""
         tabs.append(
             f'<a class="sheet-tab{cls}" href="{html.escape(_view_url(path, name), quote=True)}">'
@@ -1083,7 +1095,7 @@ def _report_view_page(path: Path, sheet_name: str = "", message: str = "", error
       </div>
       <div class="nav-actions">
         {prev_button}
-        <span class="file-name">{selected_index + 1} / {len(wb.sheetnames)}</span>
+        <span class="file-name">{selected_index + 1} / {len(visible_sheets)}</span>
         {next_button}
       </div>
     </div>

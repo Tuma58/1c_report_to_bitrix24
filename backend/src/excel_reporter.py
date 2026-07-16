@@ -40,6 +40,14 @@ REPORT_TO_WEEKLY_SHEET: dict[str, str] = {
 }
 
 DASH = "—"
+REPORT_MANAGERS: dict[str, str] = {
+    "Арсенал": "Мигунов А.А.",
+    "Реф. Сервис": "Михеев А.Н.",
+    "Шаркер": "Михеев А.Н.",
+    "ЦКР": "Игонин А.П.",
+    "Мойка на ул. Строителей": "Расторгуев С.В.",
+    "Мойка на ул. Ульяновская": "Расторгуев С.В.",
+}
 
 
 class ExcelReporter:
@@ -58,6 +66,16 @@ class ExcelReporter:
     def _write(self, ws, coord: str, value) -> None:
         """Пишет число (числовым типом) либо прочерк «—» при None."""
         ws[coord] = value if value is not None else DASH
+
+    @staticmethod
+    def _pct(value) -> Optional[float]:
+        """Преобразует процент из 1С/метрик (52) в Excel-долю (0.52)."""
+        if value is None:
+            return None
+        return float(value) / 100.0
+
+    def _write_manager(self, ws, report_name: str) -> None:
+        ws["D5"] = REPORT_MANAGERS.get(report_name, "")
 
     def fill_daily(
         self,
@@ -98,8 +116,8 @@ class ExcelReporter:
         self._write(ws, "F15", self._num(metrics.cost.fact))
         # D16/F16 (Маржа), D17/F17 (Маржинальность), D18/F18 (Средний чек) —
         # ФОРМУЛЫ Excel, НЕ трогаем.
-        self._write(ws, "D19", self._num(metrics.markup_pct.plan))
-        self._write(ws, "F19", self._num(metrics.markup_pct.fact))
+        self._write(ws, "D19", self._pct(metrics.markup_pct.plan))
+        self._write(ws, "F19", self._pct(metrics.markup_pct.fact))
 
         # Блок «Незакрытые ЗН». D23 — левая верхняя ячейка объединённого D23:F23.
         self._write(ws, "D23", self._num(metrics.unclosed_over_1day.fact))
@@ -143,7 +161,7 @@ class ExcelReporter:
         ws["D4"] = (
             f"{w.week_start.strftime('%d.%m')}–{w.week_end.strftime('%d.%m.%Y')}"
         )
-        ws["D5"] = ""  # руководитель — данных нет
+        self._write_manager(ws, report_name)
 
         # Раздел 1 «Выработка».
         self._write(ws, "D9", self._num(w.normhours.plan))
@@ -159,8 +177,8 @@ class ExcelReporter:
         self._write(ws, "D16", self._num(w.cost.plan))
         self._write(ws, "F16", self._num(w.cost.fact))
         # D17/F17 (Маржа), D18/F18 (Маржинальность), D19/F19 (Средний чек) — ФОРМУЛЫ, НЕ трогаем.
-        self._write(ws, "D20", self._num(w.markup_pct.plan))
-        self._write(ws, "F20", self._num(w.markup_pct.fact))
+        self._write(ws, "D20", self._pct(w.markup_pct.plan))
+        self._write(ws, "F20", self._pct(w.markup_pct.fact))
 
         # Раздел 3 «Выручка по дням»: строка 24 = Пн (day_metrics[0]) .. строка 30 = Вс.
         # D=Выручка, F=Нормочасы, H=ЗН закрыто. I (Ср.чек), D31/F31/H31 (ИТОГО) — ФОРМУЛЫ.
@@ -242,7 +260,7 @@ def fill_weekly_wash(self, report_name, weekly_metrics, day_breakdown, out_path)
     ws["D4"] = (
         f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
     )
-    ws["D5"] = ""
+    self._write_manager(ws, report_name)
 
     self._write(ws, "D9", self._num(w.cars.plan))
     self._write(ws, "F9", self._num(w.cars.fact))
@@ -292,15 +310,15 @@ SHOP_CELL_MAP: dict[str, dict] = {
         "planned_close_week": "D17",
         "closed": ("D21", "F21"),
         "revenue": ("D22", "F22"),
-        "payments_fact": "F23",         # D23 — пусто/«—»
-        "payments_plan": "D23",
-        "insurance_count_fact": "F24",  # D24 = 0 (шаблон)
-        "insurance_sum_fact": "F25",    # D25 = 0 (шаблон)
+        "payments_fact": None,
+        "payments_plan": None,
+        "insurance_count_fact": None,
+        "insurance_sum_fact": None,
     },
     "ЦКР": {
         "normhours": ("D8", "F8"),
         "output": ("D9", "F9"),
-        "output_cost": ("D10", "F10"),  # BLOCKED -> «—»/«—»
+        "output_cost": None,
         "active": "D14",
         "ready_today": "D15",
         "awaiting_parts": "D16",
@@ -308,10 +326,10 @@ SHOP_CELL_MAP: dict[str, dict] = {
         "planned_close_week": "D18",
         "closed": ("D22", "F22"),
         "revenue": ("D23", "F23"),
-        "payments_fact": "F24",         # D24 — пусто/«—»
-        "payments_plan": "D24",
-        "insurance_count_fact": "F25",  # D25 = 0 (шаблон)
-        "insurance_sum_fact": "F26",    # D26 = 0 (шаблон)
+        "payments_fact": None,
+        "payments_plan": None,
+        "insurance_count_fact": None,
+        "insurance_sum_fact": None,
     },
 }
 
@@ -345,7 +363,7 @@ def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     d, f = cmap["output"]
     self._write(ws, d, self._num(m.output_per_master.plan))
     self._write(ws, f, self._num(m.output_per_master.fact))
-    if cmap.get("output_cost"):  # только ЦКР — стоимость выработки BLOCKED (обе «—»)
+    if cmap.get("output_cost"):
         d, f = cmap["output_cost"]
         self._write(ws, d, self._num(m.output_cost.plan))
         self._write(ws, f, self._num(m.output_cost.fact))
@@ -364,12 +382,14 @@ def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     d, f = cmap["revenue"]
     self._write(ws, d, self._num(m.revenue_closed.plan))
     self._write(ws, f, self._num(m.revenue_closed.fact))
-    # Поступления оплат: ПЛАН отсутствует (D — «—»), ФАКТ в F.
-    self._write(ws, cmap["payments_plan"], self._num(m.payments.plan))  # None -> «—»
-    self._write(ws, cmap["payments_fact"], self._num(m.payments.fact))
-    # Страховые ЗН — BLOCKED (ФАКТ «—»); D-план = 0 в шаблоне, НЕ трогаем.
-    self._write(ws, cmap["insurance_count_fact"], self._num(m.insurance_count.fact))
-    self._write(ws, cmap["insurance_sum_fact"], self._num(m.insurance_sum.fact))
+    if cmap.get("payments_plan"):
+        self._write(ws, cmap["payments_plan"], self._num(m.payments.plan))
+    if cmap.get("payments_fact"):
+        self._write(ws, cmap["payments_fact"], self._num(m.payments.fact))
+    if cmap.get("insurance_count_fact"):
+        self._write(ws, cmap["insurance_count_fact"], self._num(m.insurance_count.fact))
+    if cmap.get("insurance_sum_fact"):
+        self._write(ws, cmap["insurance_sum_fact"], self._num(m.insurance_sum.fact))
     # Колонка H (формулы %) — НЕ трогаем.
 
     out = Path(out_path)
@@ -440,7 +460,7 @@ def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_
 
     ws["D3"] = report_name
     ws["D4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
-    ws["D5"] = ""
+    self._write_manager(ws, report_name)
 
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
@@ -452,7 +472,7 @@ def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_
     self._write(ws, cmap["active"], self._num(m.active))
     self._write(ws, cmap["closed"], self._num(m.closed_orders.fact))
     self._write(ws, cmap["revenue"], self._num(m.revenue_closed.fact))
-    self._write(ws, cmap["margin_pct"], self._num(m.margin_pct.fact))
+    self._write(ws, cmap["margin_pct"], self._pct(m.margin_pct.fact))
     self._write(ws, cmap["avg_duration"], self._num(m.avg_duration_days.fact))
     self._write(ws, cmap["overdue"], self._num(m.overdue))
     self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))
@@ -521,8 +541,8 @@ def fill_daily_in_workbook(self, wb, report_name: str, day: date, metrics: Daily
     self._write(ws, "F14", self._num(metrics.revenue.fact))
     self._write(ws, "D15", self._num(metrics.cost.plan))
     self._write(ws, "F15", self._num(metrics.cost.fact))
-    self._write(ws, "D19", self._num(metrics.markup_pct.plan))
-    self._write(ws, "F19", self._num(metrics.markup_pct.fact))
+    self._write(ws, "D19", self._pct(metrics.markup_pct.plan))
+    self._write(ws, "F19", self._pct(metrics.markup_pct.fact))
     self._write(ws, "D23", self._num(metrics.unclosed_over_1day.fact))
     ws["D24"] = DASH
 
@@ -536,7 +556,7 @@ def fill_weekly_in_workbook(self, wb, report_name: str, weekly_metrics, day_metr
 
     ws["D3"] = report_name
     ws["D4"] = f"{w.week_start.strftime('%d.%m')}–{w.week_end.strftime('%d.%m.%Y')}"
-    ws["D5"] = ""
+    self._write_manager(ws, report_name)
     self._write(ws, "D9", self._num(w.normhours.plan))
     self._write(ws, "F9", self._num(w.normhours.fact))
     self._write(ws, "D10", self._num(w.output_per_master.plan))
@@ -547,8 +567,8 @@ def fill_weekly_in_workbook(self, wb, report_name: str, weekly_metrics, day_metr
     self._write(ws, "F15", self._num(w.revenue.fact))
     self._write(ws, "D16", self._num(w.cost.plan))
     self._write(ws, "F16", self._num(w.cost.fact))
-    self._write(ws, "D20", self._num(w.markup_pct.plan))
-    self._write(ws, "F20", self._num(w.markup_pct.fact))
+    self._write(ws, "D20", self._pct(w.markup_pct.plan))
+    self._write(ws, "F20", self._pct(w.markup_pct.fact))
 
     for i in range(7):
         row = 24 + i
@@ -586,7 +606,7 @@ def fill_weekly_wash_in_workbook(self, wb, report_name, weekly_metrics, day_brea
 
     ws["D3"] = report_name
     ws["D4"] = f"{w.period_start.strftime('%d.%m')}–{w.period_end.strftime('%d.%m.%Y')}"
-    ws["D5"] = ""
+    self._write_manager(ws, report_name)
     self._write(ws, "D9", self._num(w.cars.plan))
     self._write(ws, "F9", self._num(w.cars.fact))
     self._write(ws, "D10", self._num(w.revenue.plan))
@@ -631,10 +651,14 @@ def fill_daily_shop_in_workbook(self, wb, report_name: str, shop_metrics) -> Non
     d, f = cmap["revenue"]
     self._write(ws, d, self._num(m.revenue_closed.plan))
     self._write(ws, f, self._num(m.revenue_closed.fact))
-    self._write(ws, cmap["payments_plan"], self._num(m.payments.plan))
-    self._write(ws, cmap["payments_fact"], self._num(m.payments.fact))
-    self._write(ws, cmap["insurance_count_fact"], self._num(m.insurance_count.fact))
-    self._write(ws, cmap["insurance_sum_fact"], self._num(m.insurance_sum.fact))
+    if cmap.get("payments_plan"):
+        self._write(ws, cmap["payments_plan"], self._num(m.payments.plan))
+    if cmap.get("payments_fact"):
+        self._write(ws, cmap["payments_fact"], self._num(m.payments.fact))
+    if cmap.get("insurance_count_fact"):
+        self._write(ws, cmap["insurance_count_fact"], self._num(m.insurance_count.fact))
+    if cmap.get("insurance_sum_fact"):
+        self._write(ws, cmap["insurance_sum_fact"], self._num(m.insurance_sum.fact))
 
 
 def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day_breakdown) -> None:
@@ -647,7 +671,7 @@ def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day
 
     ws["D3"] = report_name
     ws["D4"] = f"{m.week_start.strftime('%d.%m')}–{m.week_end.strftime('%d.%m.%Y')}"
-    ws["D5"] = ""
+    self._write_manager(ws, report_name)
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
     self._write(ws, f, self._num(m.normhours.fact))
@@ -657,7 +681,7 @@ def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day
     self._write(ws, cmap["active"], self._num(m.active))
     self._write(ws, cmap["closed"], self._num(m.closed_orders.fact))
     self._write(ws, cmap["revenue"], self._num(m.revenue_closed.fact))
-    self._write(ws, cmap["margin_pct"], self._num(m.margin_pct.fact))
+    self._write(ws, cmap["margin_pct"], self._pct(m.margin_pct.fact))
     self._write(ws, cmap["avg_duration"], self._num(m.avg_duration_days.fact))
     self._write(ws, cmap["overdue"], self._num(m.overdue))
     self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))

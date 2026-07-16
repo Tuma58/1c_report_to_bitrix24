@@ -26,6 +26,7 @@ try:
         IncomeExpenseRepository,
         PlanRepository,
         PaymentRepository,
+        InsuranceRepository,
     )
     from .plan_mapping import plan_code
 except ImportError:  # запуск как скрипта
@@ -36,6 +37,7 @@ except ImportError:  # запуск как скрипта
         IncomeExpenseRepository,
         PlanRepository,
         PaymentRepository,
+        InsuranceRepository,
     )
     from plan_mapping import plan_code
 
@@ -122,6 +124,7 @@ class MetricsService:
         self.income = IncomeExpenseRepository(self.client, self.references)
         self.plan = PlanRepository(self.client, self.references)
         self.payments = PaymentRepository(self.client, self.references)
+        self.insurance = InsuranceRepository(self.client, self.references)
 
     @staticmethod
     def _days_in_month(day: date) -> int:
@@ -600,10 +603,9 @@ def daily_shop(self, report_name: str, day: date) -> ShopMetrics:
     payments = self.payments.payments_period(division_key, start, end)
     result.payments = Metric(result.payments.name, payments, None)
 
-    # Страховые ЗН прошлых мес. — BLOCKED: «Дата вручения КА» отсутствует в OData счёт-фактуры.
-    # TODO(BLOCKED insurance): нет поля даты вручения контрагенту.
-    result.insurance_count = Metric(result.insurance_count.name, None, None)
-    result.insurance_sum = Metric(result.insurance_sum.name, None, None)
+    insurance = self.insurance.undelivered_previous_months(division_key, day)
+    result.insurance_count = Metric(result.insurance_count.name, float(insurance["count"]), None)
+    result.insurance_sum = Metric(result.insurance_sum.name, insurance["sum"], None)
 
     return result
 
@@ -669,9 +671,9 @@ def weekly_shop(self, report_name: str, any_date: date) -> ShopWeeklyMetrics:
     payments = self.payments.payments_period(division_key, start, end)
     result.payments = Metric(result.payments.name, payments, None)
 
-    # Остаётся заблокировано до появления в OData даты вручения/связи страховых ЗН.
-    result.insurance_count = Metric(result.insurance_count.name, None, None)
-    result.insurance_sum = Metric(result.insurance_sum.name, None, None)
+    insurance = self.insurance.undelivered_previous_months(division_key, week_end_incl)
+    result.insurance_count = Metric(result.insurance_count.name, float(insurance["count"]), None)
+    result.insurance_sum = Metric(result.insurance_sum.name, insurance["sum"], None)
     return result
 
 

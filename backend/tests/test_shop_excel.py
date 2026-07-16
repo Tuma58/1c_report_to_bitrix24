@@ -6,7 +6,7 @@
 - пайплайн Шаркера: active ≈ 40, overdue ≈ 114 (сверка с разведкой);
 - payments_period возвращает число (может быть 0) без ошибок; статья резолвится;
 - нормочасы/выработка ФАКТ берутся из дневных показателей 1С, если они есть;
-- BLOCKED-ячейки (стоимость выработки, страховые ЗН) записаны прочерком «—»;
+- BLOCKED-ячейки стоимости выработки записаны прочерком «—»; страховые ЗН считаются отдельно;
 - формулы колонки H целы.
 
 Только GET из 1С; запись только в xlsx. Если порт недоступен — код 2.
@@ -56,7 +56,7 @@ SHOP = {
     "Шаркер": {
         "sheet": "Шаркер (Д)",
         "fact_cells": {"normhours": "F8", "output_per_master": "F9"},
-        "blocked_dash": ["F24", "F25"],   # страховые ФАКТ
+        "blocked_dash": [],
         "pipeline": {"active": "D13", "overdue": "D16"},
         "payments_fact": "F23",
         "h_formulas": ["H8", "H9", "H21", "H22", "H23", "H24", "H25"],
@@ -64,7 +64,7 @@ SHOP = {
     "ЦКР": {
         "sheet": "ЦКР (Д)",
         "fact_cells": {"normhours": "F8", "output_per_master": "F9"},
-        "blocked_dash": ["D10", "F10", "F25", "F26"],  # стоимость выработки + страховые
+        "blocked_dash": ["D10", "F10"],  # стоимость выработки
         "pipeline": {"active": "D14", "overdue": "D17"},
         "payments_fact": "F24",
         "h_formulas": ["H8", "H9", "H10", "H22", "H23", "H24", "H25", "H26"],
@@ -112,7 +112,7 @@ def main() -> int:
         print(f"    Закрыто ЗН  ПЛАН={_fmt(m.closed_orders.plan)}  ФАКТ={_fmt(m.closed_orders.fact)}")
         print(f"    Выручка     ПЛАН={_fmt(m.revenue_closed.plan)}  ФАКТ={_fmt(m.revenue_closed.fact)}")
         print(f"    Оплаты      ФАКТ={_fmt(m.payments.fact)}")
-        print(f"    Страховые   count={_fmt(m.insurance_count.fact)}  sum={_fmt(m.insurance_sum.fact)} (BLOCKED)")
+        print(f"    Страховые   count={_fmt(m.insurance_count.fact)}  sum={_fmt(m.insurance_sum.fact)}")
 
         # payments — число без ошибок.
         (passed if isinstance(m.payments.fact, (int, float)) else failures).append(

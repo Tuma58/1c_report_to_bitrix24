@@ -58,6 +58,24 @@ def _num(v) -> float:
         return 0.0
 
 
+def _parse_odata_datetime(value) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    raw = value.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            return datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return None
+
+
+def _has_filled_date(value) -> bool:
+    parsed = _parse_odata_datetime(value)
+    return parsed is not None and parsed.year > 1901
+
+
 class OrderRepository:
     """Заказ-наряды: шапки, работы (нормочасы), исполнители."""
 
@@ -338,6 +356,187 @@ class IncomeExpenseRepository:
     def revenue_and_cost(self, division_key: str, day: date) -> tuple[float, float]:
         """(полная выручка = parts+works, себестоимость) за день."""
         return self.revenue_and_cost_period(division_key, day, day + timedelta(days=1))
+
+
+class InsuranceRepository:
+    """Неврученные к оплате страховые ЗН прошлых месяцев."""
+
+    REPAIR_TYPES = (
+        "Страховой ремонт термофургонов",
+        "Кузовной страховой ремонт",
+    )
+    INVOICE_DOC = "Document_СчетФактураВыданный"
+    INVOICE_ORDER_TYPE = "StandardODATA.Document_ЗаказНаряд"
+    ORIGINALS_REGISTER = "InformationRegister_олОригиналДокументаПолучен"
+    INVOICE_ORIGINAL_TYPE = "StandardODATA.Document_СчетФактураВыданный"
+    DELIVERY_DATE_FIELD = "Дата2"
+
+    def __init__(self, client: ODataClient, references: References) -> None:
+        self.client = client
+        self.references = references
+        self._repair_keys: Optional[set[str]] = None
+        self._invoice_cache: dict[tuple[str, date], dict[str, list[dict]]] = {}
+        self._delivered_cache: dict[date, set[str]] = {}
+
+    def _repair_type_keys(self) -> set[str]:
+        if self._repair_keys is not None:
+            return self._repair_keys
+        rows = self.client.get(
+            "Catalog_ВидыРемонта",
+            params=build_params(select="Ref_Key,Description"),
+        )
+        wanted = {name.casefold() for name in self.REPAIR_TYPES}
+        self._repair_keys = {
+            r["Ref_Key"]
+            for r in rows
+            if r.get("Ref_Key") and (r.get("Description") or "").casefold() in wanted
+        }
+        return self._repair_keys
+
+    @staticmethod
+    def _month_start(day: date) -> date:
+        return day.replace(day=1)
+
+    def _closed_insurance_orders(self, division_key: str, as_of: date) -> list[dict]:
+        closed_key = self.references.statuses().get("Закрыт")
+        if not closed_key:
+            raise RuntimeError("Не найден статус 'Закрыт' в References.statuses()")
+        repair_keys = self._repair_type_keys()
+        if not repair_keys:
+            return []
+        repair_clause = " or ".join(f"ВидРемонта_Key eq guid'{k}'" for k in repair_keys)
+        f = (
+            f"Состояние_Key eq guid'{closed_key}' "
+            f"and ПодразделениеКомпании_Key eq guid'{division_key}' "
+            f"and ДатаЗакрытия lt {_dt(self._month_start(as_of))} "
+            f"and ({repair_clause})"
+        )
+        return self.client.get(
+            "Document_ЗаказНаряд",
+            params=build_params(
+                filter=f,
+                select="Ref_Key,Number,ДатаЗакрытия,ВидРемонта_Key,СуммаДокумента",
+            ),
+        )
+
+    def _invoices_by_order(self, division_key: str, as_of: date) -> dict[str, list[dict]]:
+        cache_key = (division_key, as_of)
+        if cache_key in self._invoice_cache:
+            return self._invoice_cache[cache_key]
+        # Поле ДокументОснование в 1С OData имеет строковый тип неограниченной длины:
+        # фильтр по нему либо не работает, либо не возвращает строки. Поэтому читаем
+        # счет-фактуры подразделения до даты отчета и сопоставляем с ЗН в Python.
+        f = (
+            f"ПодразделениеКомпании_Key eq guid'{division_key}' "
+            f"and Date lt {_dt(as_of + timedelta(days=1))} "
+            f"and ДокументОснование_Type eq '{self.INVOICE_ORDER_TYPE}'"
+        )
+        rows = self.client.get(
+            self.INVOICE_DOC,
+            params=build_params(
+                filter=f,
+                select=(
+                    "Ref_Key,Number,Date,ДокументОснование,ДокументОснование_Type,"
+                    "СуммаДокумента,Выставлен"
+                ),
+            ),
+        )
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            order_key = row.get("ДокументОснование")
+            if order_key:
+                result.setdefault(order_key, []).append(row)
+        self._invoice_cache[cache_key] = result
+        return result
+
+    def _delivered_invoice_keys(self, as_of: date) -> set[str]:
+        if as_of in self._delivered_cache:
+            return self._delivered_cache[as_of]
+        # Регистр соответствует форме «Оригинал документа получен». Дата2 — дата
+        # строки «Получен КА», показанная в форме на скриншоте.
+        f = (
+            f"ДокументСсылка_Type eq '{self.INVOICE_ORIGINAL_TYPE}' "
+            "and ОригиналПолучен eq true "
+            "and Дата2 gt datetime'1901-01-01T00:00:00' "
+            f"and Дата2 lt {_dt(as_of + timedelta(days=1))}"
+        )
+        rows = self.client.get(
+            self.ORIGINALS_REGISTER,
+            params=build_params(
+                filter=f,
+                select=(
+                    "ДокументСсылка,ДокументСсылка_Type,ОригиналПолучен,"
+                    f"Дата,{self.DELIVERY_DATE_FIELD}"
+                ),
+            ),
+        )
+        delivered = {
+            row["ДокументСсылка"]
+            for row in rows
+            if row.get("ДокументСсылка")
+            and row.get("ОригиналПолучен") is True
+            and _has_filled_date(row.get(self.DELIVERY_DATE_FIELD))
+        }
+        self._delivered_cache[as_of] = delivered
+        return delivered
+
+    def undelivered_previous_months(self, division_key: str, as_of: date) -> dict:
+        """Возвращает count/sum и отладку по страховым ЗН прошлых месяцев.
+
+        Поле «Дата вручения КА» хранится в регистре «Оригинал документа
+        получен» как Дата2 по ссылке на счет-фактуру. Пустая дата 0001-01-01
+        считается незаполненной.
+        """
+        orders = self._closed_insurance_orders(division_key, as_of)
+        invoices = self._invoices_by_order(division_key, as_of)
+        delivered_invoice_keys = self._delivered_invoice_keys(as_of)
+        undelivered: list[dict] = []
+        delivered = 0
+        with_invoice = 0
+        without_invoice = 0
+        without_delivery_date = 0
+
+        for order in orders:
+            order_key = order.get("Ref_Key")
+            related = invoices.get(order_key, [])
+            if not related:
+                without_invoice += 1
+                undelivered.append(order)
+                continue
+            with_invoice += 1
+            if any(inv.get("Ref_Key") in delivered_invoice_keys for inv in related):
+                delivered += 1
+                continue
+            without_delivery_date += 1
+            undelivered.append(order)
+
+        return {
+            "count": len(undelivered),
+            "sum": sum(_num(order.get("СуммаДокумента")) for order in undelivered),
+            "debug": {
+                "as_of": as_of.isoformat(),
+                "month_start": self._month_start(as_of).isoformat(),
+                "repair_type_keys": sorted(self._repair_type_keys()),
+                "candidate_orders": len(orders),
+                "invoice_order_links": len(invoices),
+                "delivered_invoice_links": len(delivered_invoice_keys),
+                "with_invoice": with_invoice,
+                "delivered": delivered,
+                "without_invoice": without_invoice,
+                "without_delivery_date": without_delivery_date,
+                "delivery_date_field": self.DELIVERY_DATE_FIELD,
+                "sample": [
+                    {
+                        "number": order.get("Number"),
+                        "ref": order.get("Ref_Key"),
+                        "closed_at": order.get("ДатаЗакрытия"),
+                        "sum": order.get("СуммаДокумента"),
+                        "invoice_count": len(invoices.get(order.get("Ref_Key"), [])),
+                    }
+                    for order in undelivered[:10]
+                ],
+            },
+        }
 
 
 class PlanRepository:

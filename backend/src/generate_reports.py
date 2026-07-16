@@ -86,8 +86,9 @@ def fill_weekly_sheets(
 
     for name in SHOP_REPORTS:
         weekly = service.weekly_shop(name, any_date)
+        prev_weekly = service.weekly_shop(name, any_date - timedelta(days=7))
         days = service.week_shop_daily_breakdown(name, any_date)
-        reporter.fill_weekly_shop_in_workbook(wb, name, weekly, days)
+        reporter.fill_weekly_shop_in_workbook(wb, name, weekly, days, prev_weekly)
 
 
 def _weekly_start(service: MetricsService, any_date: date) -> date:

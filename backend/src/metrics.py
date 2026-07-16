@@ -507,7 +507,7 @@ class ShopWeeklyMetrics:
     active: int = 0
     closed_orders: Metric = field(default_factory=lambda: Metric("Закрыто ЗН за неделю", 0.0))
     revenue_closed: Metric = field(default_factory=lambda: Metric("Выручка закрытых ЗН", 0.0))
-    margin_pct: Metric = field(default_factory=lambda: Metric("Маржинальность закрытых ЗН, %", None))
+    margin_pct: Metric = field(default_factory=lambda: Metric("Наценка на ЗЧ в закрытых ЗН, %", None))
     avg_duration_days: Metric = field(default_factory=lambda: Metric("Ср. длительность ремонта, дней", None))
     overdue: int = 0
     awaiting_parts: int = 0
@@ -655,8 +655,11 @@ def weekly_shop(self, report_name: str, any_date: date) -> ShopWeeklyMetrics:
 
     breakdown = self.income.revenue_breakdown_period(division_key, start, end)
     revenue = breakdown["parts"] + breakdown["works"]
+    parts_revenue = breakdown["parts"]
     cost = breakdown["cost"]
-    margin_pct = ((revenue - cost) / revenue * 100.0) if revenue else None
+    # Наценка на запасные части в закрытых ЗН:
+    # (выручка от продажи ЗЧ - себестоимость материалов) / себестоимость материалов.
+    margin_pct = ((parts_revenue - cost) / cost * 100.0) if cost else None
     result.revenue_closed = Metric(result.revenue_closed.name, revenue, plan_revenue)
     result.margin_pct = Metric(result.margin_pct.name, margin_pct, None)
     result.avg_duration_days = Metric(

@@ -45,6 +45,7 @@ REPORT_MANAGERS: dict[str, str] = {
     "Реф. Сервис": "Михеев А.Н.",
     "Шаркер": "Михеев А.Н.",
     "ЦКР": "Игонин А.П.",
+    "Мойки": "Расторгуев С.В.",
     "Мойка на ул. Строителей": "Расторгуев С.В.",
     "Мойка на ул. Ульяновская": "Расторгуев С.В.",
 }
@@ -74,6 +75,13 @@ class ExcelReporter:
             return None
         return float(value) / 100.0
 
+    @staticmethod
+    def _diff_pct(current, previous) -> Optional[float]:
+        """Процентное изменение: (текущее - предыдущее) / предыдущее * 100."""
+        if current is None or previous in (None, 0):
+            return None
+        return (float(current) - float(previous)) / float(previous) * 100.0
+
     def _write_manager(self, ws, report_name: str) -> None:
         ws["D5"] = REPORT_MANAGERS.get(report_name, "")
 
@@ -100,6 +108,7 @@ class ExcelReporter:
         # Шапка: D3/D4 — широкая объединённая область D:I.
         ws["D3"] = report_name
         ws["D4"] = day.strftime("%d.%m.%Y")
+        self._write_manager(ws, report_name)
 
         # Блок «Выработка» (D=ПЛАН / F=ФАКТ).
         self._write(ws, "D8", self._num(metrics.normhours.plan))
@@ -218,6 +227,7 @@ def fill_daily_wash(self, day, m_stroit, m_ulyan, out_path):
     # Шапка: D3/D4 — широкая объединённая область D:I.
     ws["D3"] = "Мойки"
     ws["D4"] = day.strftime("%d.%m.%Y")
+    self._write_manager(ws, "Мойки")
 
     # Блок 1 — Мойка на ул. Строителей.
     self._write(ws, "D8", self._num(m_stroit.cars.plan))
@@ -355,6 +365,7 @@ def fill_daily_shop(self, report_name: str, shop_metrics, out_path):
     # Шапка: C3 — АТЦ, C4 — дата.
     ws["D3"] = report_name
     ws["D4"] = m.day.strftime("%d.%m.%Y")
+    self._write_manager(ws, report_name)
 
     # ---- ВЫРАБОТКА (план / факт) ----
     d, f = cmap["normhours"]
@@ -445,7 +456,46 @@ def _shop_masters(metric) -> Optional[float]:
     return normhours / output
 
 
-def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_path):
+def _shop_weekly_value(metric, key: str):
+    if key == "active":
+        return metric.active
+    if key == "closed":
+        return metric.closed_orders.fact
+    if key == "revenue":
+        return metric.revenue_closed.fact
+    if key == "margin_pct":
+        return metric.margin_pct.fact
+    if key == "avg_duration":
+        return metric.avg_duration_days.fact
+    if key == "overdue":
+        return metric.overdue
+    if key == "awaiting_parts":
+        return metric.awaiting_parts
+    if key == "payments":
+        return metric.payments.fact
+    if key == "insurance_count":
+        return metric.insurance_count.fact
+    if key == "insurance_sum":
+        return metric.insurance_sum.fact
+    return None
+
+
+def _day_label(metric, index: int) -> str:
+    names = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+    day = getattr(metric, "day", None)
+    if day is None:
+        return names[index]
+    return f"{names[index]} {day.strftime('%d.%m.%Y')}"
+
+
+def fill_weekly_shop(
+    self,
+    report_name: str,
+    weekly_metrics,
+    day_breakdown,
+    out_path,
+    prev_weekly_metrics=None,
+):
     """Заполняет недельный лист длинного ремонта («Шаркер (Н)» или «ЦКР (Н)»)."""
     sheet_name = SHOP_WEEKLY_SHEET.get(report_name)
     cmap = SHOP_WEEKLY_CELL_MAP.get(report_name)
@@ -469,26 +519,35 @@ def fill_weekly_shop(self, report_name: str, weekly_metrics, day_breakdown, out_
     self._write(ws, d, self._num(m.output_per_master.plan))
     self._write(ws, f, self._num(m.output_per_master.fact))
 
-    self._write(ws, cmap["active"], self._num(m.active))
-    self._write(ws, cmap["closed"], self._num(m.closed_orders.fact))
-    self._write(ws, cmap["revenue"], self._num(m.revenue_closed.fact))
-    self._write(ws, cmap["margin_pct"], self._pct(m.margin_pct.fact))
-    self._write(ws, cmap["avg_duration"], self._num(m.avg_duration_days.fact))
-    self._write(ws, cmap["overdue"], self._num(m.overdue))
-    self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))
-    self._write(ws, cmap["payments"], self._num(m.payments.fact))
-    if cmap.get("insurance_count"):
-        self._write(ws, cmap["insurance_count"], self._num(m.insurance_count.fact))
-    if cmap.get("insurance_sum"):
-        self._write(ws, cmap["insurance_sum"], self._num(m.insurance_sum.fact))
+    for key in (
+        "active",
+        "closed",
+        "revenue",
+        "margin_pct",
+        "avg_duration",
+        "overdue",
+        "awaiting_parts",
+        "payments",
+        "insurance_count",
+        "insurance_sum",
+    ):
+        cell = cmap.get(key)
+        if not cell:
+            continue
+        current = _shop_weekly_value(m, key)
+        previous = _shop_weekly_value(prev_weekly_metrics, key) if prev_weekly_metrics else None
+        writer = self._pct if key == "margin_pct" else self._num
+        self._write(ws, cell, writer(current))
+        self._write(ws, f"H{cell[1:]}", writer(previous))
+        self._write(ws, f"I{cell[1:]}", self._pct(self._diff_pct(current, previous)))
 
     start_row = cmap["daily_start"]
     for i in range(7):
         row = start_row + i
         dm = day_breakdown[i]
+        ws[f"B{row}"] = _day_label(dm, i)
         self._write(ws, f"D{row}", self._num(dm.normhours.fact))
         self._write(ws, f"F{row}", self._num(_shop_masters(dm)))
-        self._write(ws, f"I{row}", None)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +590,7 @@ def fill_daily_in_workbook(self, wb, report_name: str, day: date, metrics: Daily
 
     ws["D3"] = report_name
     ws["D4"] = day.strftime("%d.%m.%Y")
+    self._write_manager(ws, report_name)
     self._write(ws, "D8", self._num(metrics.normhours.plan))
     self._write(ws, "F8", self._num(metrics.normhours.fact))
     self._write(ws, "D9", self._num(metrics.output_per_master.plan))
@@ -585,6 +645,7 @@ def fill_daily_wash_in_workbook(self, wb, day, m_stroit, m_ulyan) -> None:
 
     ws["D3"] = "Мойки"
     ws["D4"] = day.strftime("%d.%m.%Y")
+    self._write_manager(ws, "Мойки")
     self._write(ws, "D8", self._num(m_stroit.cars.plan))
     self._write(ws, "F8", self._num(m_stroit.cars.fact))
     self._write(ws, "D9", self._num(m_stroit.revenue.plan))
@@ -630,6 +691,7 @@ def fill_daily_shop_in_workbook(self, wb, report_name: str, shop_metrics) -> Non
 
     ws["D3"] = report_name
     ws["D4"] = m.day.strftime("%d.%m.%Y")
+    self._write_manager(ws, report_name)
     d, f = cmap["normhours"]
     self._write(ws, d, self._num(m.normhours.plan))
     self._write(ws, f, self._num(m.normhours.fact))
@@ -661,7 +723,14 @@ def fill_daily_shop_in_workbook(self, wb, report_name: str, shop_metrics) -> Non
         self._write(ws, cmap["insurance_sum_fact"], self._num(m.insurance_sum.fact))
 
 
-def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day_breakdown) -> None:
+def fill_weekly_shop_in_workbook(
+    self,
+    wb,
+    report_name: str,
+    weekly_metrics,
+    day_breakdown,
+    prev_weekly_metrics=None,
+) -> None:
     sheet_name = SHOP_WEEKLY_SHEET.get(report_name)
     cmap = SHOP_WEEKLY_CELL_MAP.get(report_name)
     if not sheet_name or sheet_name not in wb.sheetnames or not cmap:
@@ -678,24 +747,33 @@ def fill_weekly_shop_in_workbook(self, wb, report_name: str, weekly_metrics, day
     d, f = cmap["output"]
     self._write(ws, d, self._num(m.output_per_master.plan))
     self._write(ws, f, self._num(m.output_per_master.fact))
-    self._write(ws, cmap["active"], self._num(m.active))
-    self._write(ws, cmap["closed"], self._num(m.closed_orders.fact))
-    self._write(ws, cmap["revenue"], self._num(m.revenue_closed.fact))
-    self._write(ws, cmap["margin_pct"], self._pct(m.margin_pct.fact))
-    self._write(ws, cmap["avg_duration"], self._num(m.avg_duration_days.fact))
-    self._write(ws, cmap["overdue"], self._num(m.overdue))
-    self._write(ws, cmap["awaiting_parts"], self._num(m.awaiting_parts))
-    self._write(ws, cmap["payments"], self._num(m.payments.fact))
-    if cmap.get("insurance_count"):
-        self._write(ws, cmap["insurance_count"], self._num(m.insurance_count.fact))
-    if cmap.get("insurance_sum"):
-        self._write(ws, cmap["insurance_sum"], self._num(m.insurance_sum.fact))
+    for key in (
+        "active",
+        "closed",
+        "revenue",
+        "margin_pct",
+        "avg_duration",
+        "overdue",
+        "awaiting_parts",
+        "payments",
+        "insurance_count",
+        "insurance_sum",
+    ):
+        cell = cmap.get(key)
+        if not cell:
+            continue
+        current = _shop_weekly_value(m, key)
+        previous = _shop_weekly_value(prev_weekly_metrics, key) if prev_weekly_metrics else None
+        writer = self._pct if key == "margin_pct" else self._num
+        self._write(ws, cell, writer(current))
+        self._write(ws, f"H{cell[1:]}", writer(previous))
+        self._write(ws, f"I{cell[1:]}", self._pct(self._diff_pct(current, previous)))
     for i in range(7):
         row = cmap["daily_start"] + i
         dm = day_breakdown[i]
+        ws[f"B{row}"] = _day_label(dm, i)
         self._write(ws, f"D{row}", self._num(dm.normhours.fact))
         self._write(ws, f"F{row}", self._num(_shop_masters(dm)))
-        self._write(ws, f"I{row}", None)
 
 
 ExcelReporter.new_workbook = new_workbook

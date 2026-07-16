@@ -14,6 +14,16 @@ bash -lc 'set -e; apt-get update && apt-get install -y git ca-certificates; if [
 
 Web-интерфейс по умолчанию работает на порту `8080` и не занимает порты `80` и `443`.
 
+## Обновление VPS без потери данных
+
+Для обновления уже установленного проекта выполните на VPS под `root`:
+
+```bash
+bash -lc 'set -euo pipefail; APP=/opt/1c_report; cd "$APP"; ts=$(date +%Y%m%d_%H%M%S); [ -f backend/.env ] && cp -a backend/.env "backend/.env.backup.$ts"; [ -f backend/users.json ] && cp -a backend/users.json "backend/users.json.backup.$ts"; git fetch origin main; git pull --ff-only origin main; ./setup.sh; systemctl restart 1c-report-web || true'
+```
+
+Команда сохраняет резервные копии локальных настроек перед обновлением. `backend/.env`, `backend/users.json`, `backend/output/` и сгенерированные отчёты не хранятся в Git и не затираются при `git pull --ff-only`. Если на VPS есть локальные изменения в tracked-файлах проекта, обновление остановится вместо перезаписи этих файлов.
+
 ## Первичная настройка
 
 После установки заполните секреты и параметры подключения через web-интерфейс:

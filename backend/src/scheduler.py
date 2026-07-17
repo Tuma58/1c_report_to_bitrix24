@@ -78,8 +78,16 @@ def build_entries(values: dict[str, str]) -> list[CronEntry]:
 
     send_flags = []
     if _truthy(_get(values, "SCHEDULE_SEND_BITRIX", "1"), default=True):
+        if not _get(values, "BITRIX_WEBHOOK_URL") or not _get(values, "BITRIX_CHAT_ID"):
+            raise ScheduleError(
+                "SCHEDULE_SEND_BITRIX=1, но BITRIX_WEBHOOK_URL или BITRIX_CHAT_ID не заданы"
+            )
         send_flags.append("--send-bitrix")
     if _truthy(_get(values, "SCHEDULE_SEND_EMAIL", "0")):
+        if not _get(values, "EMAIL_SMTP_HOST") or not _get(values, "EMAIL_FROM") or not _get(values, "EMAIL_TO"):
+            raise ScheduleError(
+                "SCHEDULE_SEND_EMAIL=1, но EMAIL_SMTP_HOST, EMAIL_FROM или EMAIL_TO не заданы"
+            )
         send_flags.append("--send-email")
     send_args = " ".join(send_flags)
 

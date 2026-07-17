@@ -39,7 +39,7 @@
 | EntitySet | Где используется | Назначение | Поля / условия |
 |---|---|---|---|
 | `AccumulationRegister_ДоходыИРасходы_RecordType` | `IncomeExpenseRepository` | Факт выручки, работ, себестоимости, наценки | `$filter=ПодразделениеКомпании_Key eq guid'<division>' and Period in [start,end) and Active eq true`; `$select=Period,ПодразделениеКомпании_Key,СтатьяДоходовИРасходов_Key,ДоходБезНДС,РасходБезНДС,Active` |
-| `AccumulationRegister_ВзаиморасчетыКомпании_RecordType` | `InsuranceRepository` | Исключение полностью оплаченных страховых ЗН и расчёт неоплаченного остатка | `$filter=Recorder_Type eq 'StandardODATA.Document_Выписка' and Сделка_Type eq 'StandardODATA.Document_ЗаказНаряд' and ВидОперации eq 'ПогашениеДебиторскойЗадолженности' and RecordType eq 'Expense' and Period lt <as_of+1>`; `$select=Period,Recorder,Recorder_Type,RecordType,Сделка,Сделка_Type,Сумма,ВидОперации,ДоговорВзаиморасчетов_Key`; сопоставление с ЗН выполняется в Python |
+| `AccumulationRegister_ВзаиморасчетыКомпании/Balance(Period=<дата отчёта + 1 день>)` | `InsuranceRepository` | Исключение оплаченных страховых ЗН и расчёт конечного остатка | `$filter=Сделка_Type eq 'StandardODATA.Document_ЗаказНаряд' and СуммаBalance gt 1`; `$select=Контрагент_Key,ДоговорВзаиморасчетов_Key,Сделка,Сделка_Type,СуммаBalance`; сопоставление с ЗН выполняется в Python по `Сделка = Ref_Key ЗН` |
 
 ## Регистры сведений
 
@@ -66,7 +66,7 @@
 - `Document_ПрибылиУбытки_УстановкаЗначенийПлановыхПоказателей_Показатели`
 - `Document_Выписка`
 - `AccumulationRegister_ДоходыИРасходы_RecordType`
-- `AccumulationRegister_ВзаиморасчетыКомпании_RecordType`
+- `AccumulationRegister_ВзаиморасчетыКомпании/Balance`
 - `InformationRegister_олОригиналДокументаПолучен`
 
 Особые поля, которые уже вызывали проблемы при переносе базы:
@@ -74,4 +74,4 @@
 - `Document_Выписка.СуммаДокументаПриход` обязателен для поступлений оплат.
 - `InformationRegister_олОригиналДокументаПолучен.Дата2` обязателен для даты `Получен КА`.
 - `Catalog_ВидыРемонта`, `Document_СчетФактураВыданный`, `InformationRegister_олОригиналДокументаПолучен` обязательны для страховых ЗН.
-- `AccumulationRegister_ВзаиморасчетыКомпании_RecordType.Сделка` и `Сделка_Type` обязательны для исключения оплаченных страховых ЗН.
+- `AccumulationRegister_ВзаиморасчетыКомпании/Balance.Сделка`, `Сделка_Type`, `СуммаBalance` обязательны для исключения оплаченных страховых ЗН.

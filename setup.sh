@@ -193,10 +193,13 @@ echo "[6/8] Smoke-checking Python modules"
 
 install_web_service
 
+if command -v systemctl >/dev/null 2>&1; then
+  $SUDO systemctl enable --now cron >/dev/null 2>&1 || true
+fi
+
 if [[ "${INSTALL_CRON:-0}" == "1" ]]; then
   echo "[8/8] Installing cron jobs from backend/.env schedule settings"
   "$PYTHON_BIN" "$BACKEND_DIR/src/scheduler.py"
-  $SUDO systemctl enable --now cron >/dev/null 2>&1 || true
 else
   echo "[8/8] Cron skipped. Configure schedule in Web UI or re-run with INSTALL_CRON=1 ./setup.sh."
 fi

@@ -20,6 +20,21 @@ class FilterClient:
         return []
 
 
+class BalanceClient:
+    def __init__(self) -> None:
+        self.entity = ""
+        self.filter = ""
+
+    def get(self, entity: str, params: dict | None = None) -> list[dict]:
+        self.entity = entity
+        self.filter = (params or {}).get("$filter", "")
+        return [
+            {"Сделка": "order-a", "СуммаBalance": 1200.0},
+            {"Сделка": "order-a", "СуммаBalance": 300.0},
+            {"Сделка": "order-b", "СуммаBalance": 0.5},
+        ]
+
+
 class FilterReferences:
     def statuses(self) -> dict[str, str]:
         return {"Закрыт": "closed-status"}
@@ -45,30 +60,26 @@ def main() -> int:
             {"Ref_Key": "sf-6-b", "СуммаДокумента": 6000},
         ],
     }
-    paid = {
-        "invoice-paid": 1990,
-        "invoice-partial": 1000,
-        "invoice-delivered": 0,
-        "no-invoice-paid": 5000,
-        "duplicate-invoices-paid": 6000,
+    balances = {
+        "no-invoice-open": 1000,
+        "invoice-partial": 2000,
+        "invoice-delivered": 4000,
     }
 
     repo._closed_insurance_orders = lambda _division, _as_of: orders  # type: ignore[method-assign]
     repo._invoices_by_order = lambda _division, _as_of: invoices  # type: ignore[method-assign]
     repo._delivered_invoice_keys = lambda _as_of: {"sf-4"}  # type: ignore[method-assign]
-    repo._paid_by_order = lambda _as_of: paid  # type: ignore[method-assign]
+    repo._balance_by_order = lambda _as_of: balances  # type: ignore[method-assign]
     repo._repair_type_keys = lambda: {"repair-type"}  # type: ignore[method-assign]
 
     result = repo.undelivered_previous_months("division", as_of)
 
     assert result["count"] == 2, result
     assert result["sum"] == 3000, result
-    assert result["debug"]["fully_paid_excluded"] == 3, result["debug"]
-    assert result["debug"]["partially_paid"] == 1, result["debug"]
+    assert result["debug"]["no_positive_balance_excluded"] == 3, result["debug"]
 
     sample = {item["number"]: item for item in result["debug"]["sample"]}
     assert sample["ZN-1"]["unpaid"] == 1000
-    assert sample["ZN-3"]["paid"] == 1000
     assert sample["ZN-3"]["unpaid"] == 2000
 
     filter_client = FilterClient()
@@ -77,6 +88,17 @@ def main() -> int:
     filter_repo._closed_insurance_orders("division-main", as_of)
     assert "ДатаЗакрытия ge datetime'2025-12-30T00:00:00'" in filter_client.filter
     assert "ДатаЗакрытия lt datetime'2026-07-11T00:00:00'" in filter_client.filter
+
+    balance_client = BalanceClient()
+    balance_repo = InsuranceRepository(balance_client, FilterReferences())  # type: ignore[arg-type]
+    balances = balance_repo._balance_by_order(as_of)
+    assert balance_client.entity == (
+        "AccumulationRegister_ВзаиморасчетыКомпании/Balance"
+        "(Period=datetime'2026-07-11T00:00:00')"
+    )
+    assert "Сделка_Type eq 'StandardODATA.Document_ЗаказНаряд'" in balance_client.filter
+    assert "СуммаBalance gt 1" in balance_client.filter
+    assert balances == {"order-a": 1500.0}
 
     print("insurance repository payment filtering ok")
     return 0

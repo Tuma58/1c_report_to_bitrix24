@@ -371,10 +371,8 @@ class InsuranceRepository:
     ORIGINALS_REGISTER = "InformationRegister_олОригиналДокументаПолучен"
     INVOICE_ORIGINAL_TYPE = "StandardODATA.Document_СчетФактураВыданный"
     DELIVERY_DATE_FIELD = "Дата2"
-    PAYMENT_REGISTER = "AccumulationRegister_ВзаиморасчетыКомпании_RecordType"
+    PAYMENT_BALANCE = "AccumulationRegister_ВзаиморасчетыКомпании/Balance"
     PAYMENT_ORDER_TYPE = "StandardODATA.Document_ЗаказНаряд"
-    PAYMENT_RECORDER_TYPE = "StandardODATA.Document_Выписка"
-    PAYMENT_OPERATION = "ПогашениеДебиторскойЗадолженности"
     PAYMENT_TOLERANCE = 1.0
 
     def __init__(self, client: ODataClient, references: References) -> None:
@@ -383,7 +381,7 @@ class InsuranceRepository:
         self._repair_keys: Optional[set[str]] = None
         self._invoice_cache: dict[tuple[str, date], dict[str, list[dict]]] = {}
         self._delivered_cache: dict[date, set[str]] = {}
-        self._payment_cache: dict[date, dict[str, float]] = {}
+        self._balance_cache: dict[date, dict[str, float]] = {}
 
     def _repair_type_keys(self) -> set[str]:
         if self._repair_keys is not None:
@@ -488,73 +486,65 @@ class InsuranceRepository:
         self._delivered_cache[as_of] = delivered
         return delivered
 
-    @staticmethod
-    def _payable_amount(order: dict, invoices: list[dict]) -> float:
-        order_sum = _num(order.get("СуммаДокумента"))
-        # У одного ЗН могут быть повторные/переоформленные счет-фактуры на ту же
-        # сумму. Суммировать их нельзя: это задваивает ожидаемую оплату.
-        invoice_sum = max((_num(inv.get("СуммаДокумента")) for inv in invoices), default=0.0)
-        return max(order_sum, invoice_sum)
+    def _balance_entity(self, as_of: date) -> str:
+        return f"{self.PAYMENT_BALANCE}(Period={_dt(self._selection_end(as_of))})"
 
-    def _paid_by_order(self, as_of: date) -> dict[str, float]:
-        if as_of in self._payment_cache:
-            return self._payment_cache[as_of]
-        # Оплаты страховых ЗН проходят движениями банковской выписки по регистру
-        # взаиморасчетов. Сделка хранит ссылку на ЗН, но поле строковое
-        # неограниченной длины, поэтому сопоставление с нужными ЗН делаем в Python.
-        f = (
-            f"Recorder_Type eq '{self.PAYMENT_RECORDER_TYPE}' "
-            f"and Сделка_Type eq '{self.PAYMENT_ORDER_TYPE}' "
-            f"and ВидОперации eq '{self.PAYMENT_OPERATION}' "
-            "and RecordType eq 'Expense' "
-            f"and Period lt {_dt(as_of + timedelta(days=1))}"
-        )
+    def _balance_by_order(self, as_of: date) -> dict[str, float]:
+        if as_of in self._balance_cache:
+            return self._balance_cache[as_of]
+        # Итоговый конечный остаток взаиморасчетов на дату отчета. Виртуальная
+        # таблица Balance возвращает остаток по сделке; положительный остаток
+        # по сделке-ЗН считаем неоплаченной суммой.
+        f = f"Сделка_Type eq '{self.PAYMENT_ORDER_TYPE}' and СуммаBalance gt {self.PAYMENT_TOLERANCE:g}"
         rows = self.client.get(
-            self.PAYMENT_REGISTER,
+            self._balance_entity(as_of),
             params=build_params(
                 filter=f,
                 select=(
-                    "Period,Recorder,Recorder_Type,RecordType,Сделка,Сделка_Type,"
-                    "Сумма,ВидОперации,ДоговорВзаиморасчетов_Key"
+                    "Контрагент_Key,ДоговорВзаиморасчетов_Key,Сделка,"
+                    "Сделка_Type,СуммаBalance"
                 ),
             ),
         )
-        paid: dict[str, float] = {}
+        balances: dict[str, float] = {}
         for row in rows:
             order_key = row.get("Сделка")
             if not order_key:
                 continue
-            paid[order_key] = paid.get(order_key, 0.0) + _num(row.get("Сумма"))
-        self._payment_cache[as_of] = paid
-        return paid
+            amount = _num(row.get("СуммаBalance"))
+            if amount <= self.PAYMENT_TOLERANCE:
+                continue
+            balances[order_key] = balances.get(order_key, 0.0) + amount
+        self._balance_cache[as_of] = balances
+        return balances
 
     def undelivered_previous_months(self, division_key: str, as_of: date) -> dict:
         """Возвращает count/sum и отладку по страховым ЗН прошлых месяцев.
 
         Поле «Дата вручения КА» хранится в регистре «Оригинал документа
         получен» как Дата2 по ссылке на счет-фактуру. Пустая дата 0001-01-01
-        считается незаполненной. Полностью оплаченные ЗН исключаются, частично
-        оплаченные остаются с суммой неоплаченного остатка.
+        считается незаполненной. ЗН без положительного конечного остатка
+        взаиморасчетов исключаются.
         """
         orders = self._closed_insurance_orders(division_key, as_of)
         invoices = self._invoices_by_order(division_key, as_of)
         delivered_invoice_keys = self._delivered_invoice_keys(as_of)
-        paid_by_order = self._paid_by_order(as_of)
+        balance_by_order = self._balance_by_order(as_of)
         undelivered: list[dict] = []
         delivered = 0
         with_invoice = 0
         without_invoice = 0
         without_delivery_date = 0
-        fully_paid = 0
-        partially_paid = 0
+        no_positive_balance = 0
         unpaid_sum = 0.0
 
         for order in orders:
             order_key = order.get("Ref_Key")
             related = invoices.get(order_key, [])
-            payable = self._payable_amount(order, related)
-            paid = paid_by_order.get(order_key, 0.0)
-            unpaid = max(payable - paid, 0.0)
+            unpaid = balance_by_order.get(order_key, 0.0)
+            if unpaid <= self.PAYMENT_TOLERANCE:
+                no_positive_balance += 1
+                continue
             if not related:
                 without_invoice += 1
             else:
@@ -564,14 +554,7 @@ class InsuranceRepository:
                     continue
                 without_delivery_date += 1
 
-            if unpaid <= self.PAYMENT_TOLERANCE:
-                fully_paid += 1
-                continue
-            if paid > self.PAYMENT_TOLERANCE:
-                partially_paid += 1
             enriched = dict(order)
-            enriched["_payable_sum"] = payable
-            enriched["_paid_sum"] = paid
             enriched["_unpaid_sum"] = unpaid
             undelivered.append(enriched)
             unpaid_sum += unpaid
@@ -587,13 +570,13 @@ class InsuranceRepository:
                 "candidate_orders": len(orders),
                 "invoice_order_links": len(invoices),
                 "delivered_invoice_links": len(delivered_invoice_keys),
-                "payment_order_links": len(paid_by_order),
+                "balance_order_links": len(balance_by_order),
                 "with_invoice": with_invoice,
                 "delivered": delivered,
                 "without_invoice": without_invoice,
                 "without_delivery_date": without_delivery_date,
-                "fully_paid_excluded": fully_paid,
-                "partially_paid": partially_paid,
+                "no_positive_balance_excluded": no_positive_balance,
+                "balance_entity": self._balance_entity(as_of),
                 "delivery_date_field": self.DELIVERY_DATE_FIELD,
                 "sample": [
                     {
@@ -601,8 +584,7 @@ class InsuranceRepository:
                         "ref": order.get("Ref_Key"),
                         "closed_at": order.get("ДатаЗакрытия"),
                         "sum": order.get("СуммаДокумента"),
-                        "payable": order.get("_payable_sum"),
-                        "paid": order.get("_paid_sum"),
+                        "balance": order.get("_unpaid_sum"),
                         "unpaid": order.get("_unpaid_sum"),
                         "invoice_count": len(invoices.get(order.get("Ref_Key"), [])),
                     }

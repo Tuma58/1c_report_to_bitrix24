@@ -10,6 +10,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from repositories import InsuranceRepository  # noqa: E402
 
 
+class FilterClient:
+    def __init__(self) -> None:
+        self.filter = ""
+
+    def get(self, entity: str, params: dict | None = None) -> list[dict]:
+        assert entity == "Document_ЗаказНаряд"
+        self.filter = (params or {}).get("$filter", "")
+        return []
+
+
+class FilterReferences:
+    def statuses(self) -> dict[str, str]:
+        return {"Закрыт": "closed-status"}
+
+
 def main() -> int:
     repo = InsuranceRepository(client=None, references=None)  # type: ignore[arg-type]
     as_of = date(2026, 7, 10)
@@ -55,6 +70,13 @@ def main() -> int:
     assert sample["ZN-1"]["unpaid"] == 1000
     assert sample["ZN-3"]["paid"] == 1000
     assert sample["ZN-3"]["unpaid"] == 2000
+
+    filter_client = FilterClient()
+    filter_repo = InsuranceRepository(filter_client, FilterReferences())  # type: ignore[arg-type]
+    filter_repo._repair_type_keys = lambda: {"repair-type"}  # type: ignore[method-assign]
+    filter_repo._closed_insurance_orders("division-main", as_of)
+    assert "ДатаЗакрытия ge datetime'2025-12-30T00:00:00'" in filter_client.filter
+    assert "ДатаЗакрытия lt datetime'2026-07-11T00:00:00'" in filter_client.filter
 
     print("insurance repository payment filtering ok")
     return 0

@@ -1,0 +1,77 @@
+# Реестр OData-сущностей 1С
+
+Этот файл фиксирует все OData-сущности, которые затрагивает код проекта.
+При каждом изменении OData-запросов в `backend/src` нужно обновлять этот
+реестр: добавить/удалить сущность, поле, фильтр или назначение.
+
+## Служебные запросы
+
+| Сущность / URL | Где используется | Назначение | Поля / условия |
+|---|---|---|---|
+| `$metadata` | `backend/src/odata_client.py`, `backend/src/smoke_test.py` | Проверка доступности OData и количества `EntitySet` | Без `$select`; читается XML metadata |
+
+## Справочники
+
+| EntitySet | Где используется | Назначение | Поля / условия |
+|---|---|---|---|
+| `Catalog_ПодразделенияКомпании` | `backend/src/references.py`, `backend/src/smoke_test.py` | Маппинг отчётов на подразделения 1С | `$select=Ref_Key,Description`; сопоставление по `Description` |
+| `Catalog_ВидыСостоянийЗаказНарядов` | `backend/src/references.py`, `backend/src/smoke_test.py` | Статусы ЗН: `Закрыт`, `Отказ`, `Архив`, `Заявка`, ожидание ЗЧ и др. | `$select=Ref_Key,Description` |
+| `Catalog_СтатьиДоходовИРасходов` | `backend/src/references.py`, `IncomeExpenseRepository` | Резолв статей выручки/работ/себестоимости | `$select=Ref_Key,Description`; используются `Выручка по заказ-нарядам`, `Работы по заказ-нарядам`, `Себестоимость материалов` |
+| `Catalog_ПрибылиУбытки_ПлановыеПоказатели` | `backend/src/references.py`, `PlanRepository` | Резолв кодов плановых показателей | `$select=Ref_Key,Code,Description`; коды см. `backend/src/plan_mapping.py` |
+| `Catalog_СтатьиДДС` | `backend/src/references.py`, `PaymentRepository` | Резолв статьи ДДС для оплат | `$select=Ref_Key,Description`; используется `Оплата от покупателя` |
+| `Catalog_ДоговорыВзаиморасчетов` | `backend/src/references.py`, `PaymentRepository` | Список договоров подразделения для фильтрации банковских выписок | `$filter=Подразделение_Key eq guid'<division>'`; `$select=Ref_Key,Подразделение_Key` |
+| `Catalog_ВидыРемонта` | `InsuranceRepository` | Фильтр страховых ЗН | `$select=Ref_Key,Description`; используются `Страховой ремонт термофургонов`, `Кузовной страховой ремонт` |
+
+## Документы
+
+| EntitySet | Где используется | Назначение | Поля / условия |
+|---|---|---|---|
+| `Document_ЗаказНаряд` | `OrderRepository`, `InsuranceRepository`, `smoke_test.py` | Основной источник ЗН: закрытые, незакрытые, пайплайн, страховые ЗН | Закрытые: фильтр по `Состояние_Key`, `ПодразделениеКомпании_Key`, `ДатаЗакрытия`; поля `Ref_Key,Number,Date,ДатаНачала,ДатаЗакрытия,СуммаДокумента,Состояние_Key,ПодразделениеКомпании_Key`. Пайплайн: фильтры по `Date`, `ПлановаяДатаВыдачи`, `Состояние_Key`; `$select=Ref_Key`. Страховые: дополнительно `ВидРемонта_Key`; период страховых ЗН ограничен `ДатаЗакрытия ge datetime'2025-12-30T00:00:00'` и `ДатаЗакрытия lt <дата отчёта + 1 день>` |
+| `Document_ЗаказНаряд_Работы` | `OrderRepository.works` | Нормочасы по закрытым ЗН | `$filter=Ref_Key in batch`; `$select=Ref_Key,Количество,Коэффициент` |
+| `Document_ЗаказНаряд_Исполнители` | `OrderRepository.executors` | Количество исполнителей/мастеров по закрытым ЗН | `$filter=Ref_Key in batch`; `$select=Ref_Key,Исполнитель_Key` |
+| `Document_СчетФактураВыданный` | `InsuranceRepository` | Подчинённые счёт-фактуры по страховым ЗН | `$filter=ПодразделениеКомпании_Key eq guid'<division>' and Date lt <as_of+1> and ДокументОснование_Type eq 'StandardODATA.Document_ЗаказНаряд'`; `$select=Ref_Key,Number,Date,ДокументОснование,ДокументОснование_Type,СуммаДокумента,Выставлен`. Сопоставление с ЗН выполняется в Python, потому что фильтр по `ДокументОснование` в OData 1С ненадёжен |
+| `Document_ПрибылиУбытки_УстановкаЗначенийПлановыхПоказателей` | `PlanRepository` | Документы месячного плана и дневного факта длинных ремонтов | Фильтр по `ПодразделениеКомпании_Key` и `ДатаФиксации`; `$select=Ref_Key,Date,ДатаФиксации,ПодразделениеКомпании_Key`; `$orderby=Date desc` |
+| `Document_ПрибылиУбытки_УстановкаЗначенийПлановыхПоказателей_Показатели` | `PlanRepository.indicator_values` | Строки плановых/фактических показателей | `$filter=Ref_Key eq guid'<doc>'`; `$select=Ref_Key,Показатель,ЗначениеПоказателя` |
+| `Document_Выписка` | `PaymentRepository` | Поступления оплат по подразделению | `$filter=СтатьяДДС_Key eq guid'<Оплата от покупателя>' and Date in [start,end)`; `$select=Ref_Key,Date,СтатьяДДС_Key,ДоговорВзаиморасчетов_Key,СуммаДокументаПриход`; принадлежность подразделению проверяется через договоры |
+
+## Регистры накопления
+
+| EntitySet | Где используется | Назначение | Поля / условия |
+|---|---|---|---|
+| `AccumulationRegister_ДоходыИРасходы_RecordType` | `IncomeExpenseRepository` | Факт выручки, работ, себестоимости, наценки | `$filter=ПодразделениеКомпании_Key eq guid'<division>' and Period in [start,end) and Active eq true`; `$select=Period,ПодразделениеКомпании_Key,СтатьяДоходовИРасходов_Key,ДоходБезНДС,РасходБезНДС,Active` |
+| `AccumulationRegister_ВзаиморасчетыКомпании_RecordType` | `InsuranceRepository` | Исключение полностью оплаченных страховых ЗН и расчёт неоплаченного остатка | `$filter=Recorder_Type eq 'StandardODATA.Document_Выписка' and Сделка_Type eq 'StandardODATA.Document_ЗаказНаряд' and ВидОперации eq 'ПогашениеДебиторскойЗадолженности' and RecordType eq 'Expense' and Period lt <as_of+1>`; `$select=Period,Recorder,Recorder_Type,RecordType,Сделка,Сделка_Type,Сумма,ВидОперации,ДоговорВзаиморасчетов_Key`; сопоставление с ЗН выполняется в Python |
+
+## Регистры сведений
+
+| EntitySet | Где используется | Назначение | Поля / условия |
+|---|---|---|---|
+| `InformationRegister_олОригиналДокументаПолучен` | `InsuranceRepository` | Дата вручения КА по счёт-фактуре | `$filter=ДокументСсылка_Type eq 'StandardODATA.Document_СчетФактураВыданный' and ОригиналПолучен eq true and Дата2 gt datetime'1901-01-01T00:00:00' and Дата2 lt <as_of+1>`; `$select=ДокументСсылка,ДокументСсылка_Type,ОригиналПолучен,Дата,Дата2`; `Дата2` соответствует полю формы `Получен КА / Дата` |
+
+## Проверки доступности для новой базы
+
+Минимальный набор для формирования текущих отчётов:
+
+- `Catalog_ПодразделенияКомпании`
+- `Catalog_ВидыСостоянийЗаказНарядов`
+- `Catalog_СтатьиДоходовИРасходов`
+- `Catalog_ПрибылиУбытки_ПлановыеПоказатели`
+- `Catalog_СтатьиДДС`
+- `Catalog_ДоговорыВзаиморасчетов`
+- `Catalog_ВидыРемонта`
+- `Document_ЗаказНаряд`
+- `Document_ЗаказНаряд_Работы`
+- `Document_ЗаказНаряд_Исполнители`
+- `Document_СчетФактураВыданный`
+- `Document_ПрибылиУбытки_УстановкаЗначенийПлановыхПоказателей`
+- `Document_ПрибылиУбытки_УстановкаЗначенийПлановыхПоказателей_Показатели`
+- `Document_Выписка`
+- `AccumulationRegister_ДоходыИРасходы_RecordType`
+- `AccumulationRegister_ВзаиморасчетыКомпании_RecordType`
+- `InformationRegister_олОригиналДокументаПолучен`
+
+Особые поля, которые уже вызывали проблемы при переносе базы:
+
+- `Document_Выписка.СуммаДокументаПриход` обязателен для поступлений оплат.
+- `InformationRegister_олОригиналДокументаПолучен.Дата2` обязателен для даты `Получен КА`.
+- `Catalog_ВидыРемонта`, `Document_СчетФактураВыданный`, `InformationRegister_олОригиналДокументаПолучен` обязательны для страховых ЗН.
+- `AccumulationRegister_ВзаиморасчетыКомпании_RecordType.Сделка` и `Сделка_Type` обязательны для исключения оплаченных страховых ЗН.

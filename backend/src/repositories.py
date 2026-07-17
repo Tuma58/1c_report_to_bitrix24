@@ -361,6 +361,7 @@ class IncomeExpenseRepository:
 class InsuranceRepository:
     """Неврученные к оплате страховые ЗН прошлых месяцев."""
 
+    SELECTION_START = date(2025, 12, 30)
     REPAIR_TYPES = (
         "Страховой ремонт термофургонов",
         "Кузовной страховой ремонт",
@@ -400,8 +401,8 @@ class InsuranceRepository:
         return self._repair_keys
 
     @staticmethod
-    def _month_start(day: date) -> date:
-        return day.replace(day=1)
+    def _selection_end(day: date) -> date:
+        return day + timedelta(days=1)
 
     def _closed_insurance_orders(self, division_key: str, as_of: date) -> list[dict]:
         closed_key = self.references.statuses().get("Закрыт")
@@ -414,7 +415,8 @@ class InsuranceRepository:
         f = (
             f"Состояние_Key eq guid'{closed_key}' "
             f"and ПодразделениеКомпании_Key eq guid'{division_key}' "
-            f"and ДатаЗакрытия lt {_dt(self._month_start(as_of))} "
+            f"and ДатаЗакрытия ge {_dt(self.SELECTION_START)} "
+            f"and ДатаЗакрытия lt {_dt(self._selection_end(as_of))} "
             f"and ({repair_clause})"
         )
         return self.client.get(
@@ -579,7 +581,8 @@ class InsuranceRepository:
             "sum": unpaid_sum,
             "debug": {
                 "as_of": as_of.isoformat(),
-                "month_start": self._month_start(as_of).isoformat(),
+                "selection_start": self.SELECTION_START.isoformat(),
+                "selection_end_exclusive": self._selection_end(as_of).isoformat(),
                 "repair_type_keys": sorted(self._repair_type_keys()),
                 "candidate_orders": len(orders),
                 "invoice_order_links": len(invoices),

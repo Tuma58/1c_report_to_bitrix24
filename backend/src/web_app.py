@@ -30,6 +30,7 @@ from openpyxl.utils import get_column_letter
 
 try:
     from .bitrix_sender import BitrixError
+    from .cleanup import cleanup_output_files, truthy_value
     from .email_sender import EmailError
     from .generate_reports import (
         OUTPUT_DIR,
@@ -44,6 +45,7 @@ try:
     from .scheduler import ScheduleError, install_from_values as install_schedule
 except ImportError:  # запуск как скрипта из backend/src
     from bitrix_sender import BitrixError
+    from cleanup import cleanup_output_files, truthy_value
     from email_sender import EmailError
     from generate_reports import (
         OUTPUT_DIR,
@@ -230,6 +232,30 @@ SETTINGS_FIELDS = [
         "kind": "bool",
     },
     {
+        "key": "FILE_CLEANUP_ENABLED",
+        "label": "Включить автоочистку файлов",
+        "section": "Файлы",
+        "kind": "bool",
+        "help": "Удаляются только .xlsx-файлы из backend/output.",
+    },
+    {
+        "key": "FILE_CLEANUP_DAYS",
+        "label": "Хранить файлы, дней",
+        "section": "Файлы",
+        "kind": "int",
+        "min": 1,
+        "max": 3650,
+    },
+    {
+        "key": "FILE_CLEANUP_MAX_FILES",
+        "label": "Максимум файлов в списке хранения",
+        "section": "Файлы",
+        "kind": "int",
+        "min": 1,
+        "max": 10000,
+        "help": "Если файлов больше, самые старые будут удалены.",
+    },
+    {
         "key": "WEB_UI_HOST",
         "label": "Адрес Web UI",
         "section": "Web UI",
@@ -311,7 +337,7 @@ def _safe_output_path(filename: str) -> Optional[Path]:
     return path if path.exists() else None
 
 
-def _recent_reports(limit: int = 10) -> list[Path]:
+def _recent_reports(limit: int = 100) -> list[Path]:
     if not OUTPUT_DIR.exists():
         return []
     files = [p for p in OUTPUT_DIR.glob("*.xlsx") if p.is_file()]
@@ -1106,6 +1132,22 @@ def _report_view_page(path: Path, sheet_name: str = "", message: str = "", error
 </html>"""
 
 
+def _file_controls(path: Path) -> str:
+    filename = html.escape(path.name, quote=True)
+    return f"""
+    <div class="file-actions">
+      <a href="{html.escape(_view_url(path), quote=True)}">Открыть</a>
+      <span>·</span>
+      <a href="{html.escape(_file_url(path), quote=True)}">Скачать</a>
+      <span>·</span>
+      <form method="post" action="/delete-file">
+        <input type="hidden" name="file" value="{filename}">
+        <button class="link-danger" type="submit" onclick="return confirm('Удалить файл?')">Удалить</button>
+      </form>
+    </div>
+    """
+
+
 def _page(
     *,
     selected_mode: str = "all",
@@ -1140,7 +1182,7 @@ def _page(
                   <span>{html.escape(report.kind)}</span>
                   <div class="file-row">
                     <a href="{_view_url(report.path)}">{name}</a>
-                    <small><a href="{_view_url(report.path)}">Открыть</a> · <a href="{_file_url(report.path)}">Скачать</a></small>
+                    {_file_controls(report.path)}
                   </div>
                 </li>
                 """
@@ -1160,7 +1202,7 @@ def _page(
               <span>{html.escape(_fmt_mtime(path))}</span>
               <div class="file-row">
                 <a href="{_view_url(path)}">{html.escape(path.name)}</a>
-                <small><a href="{_view_url(path)}">Открыть</a> · <a href="{_file_url(path)}">Скачать</a></small>
+                {_file_controls(path)}
               </div>
             </li>
             """
@@ -1442,6 +1484,9 @@ def _page(
       margin: 0;
       display: grid;
       gap: 10px;
+      max-height: min(520px, 58vh);
+      overflow-y: auto;
+      padding-right: 6px;
     }}
     .file-list li {{
       display: grid;
@@ -1465,9 +1510,34 @@ def _page(
       gap: 3px;
       min-width: 0;
     }}
-    .file-row small {{
+    .file-actions {{
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      align-items: center;
       color: var(--muted);
       font-size: 12px;
+    }}
+    .file-actions form {{
+      display: inline;
+      margin: 0;
+    }}
+    .link-danger {{
+      min-height: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--danger);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }}
+    .link-danger:hover {{
+      background: transparent;
+      color: #8f1d14;
     }}
     a {{
       color: var(--accent-dark);
@@ -2015,6 +2085,15 @@ def _apply_schedule(values: dict[str, str]) -> str:
     return "Расписание выключено, задачи cron удалены."
 
 
+def _apply_cleanup(values: dict[str, str]) -> str:
+    if not truthy_value(values.get("FILE_CLEANUP_ENABLED", "0")):
+        return "Автоочистка файлов выключена."
+    deleted = cleanup_output_files(values)
+    if deleted:
+        return f"Автоочистка удалила файлов: {deleted}."
+    return "Автоочистка файлов выполнена, удалять нечего."
+
+
 def _reports_from_query(params: dict[str, list[str]]) -> list[GeneratedReport]:
     reports: list[GeneratedReport] = []
     for filename in params.get("file", []):
@@ -2148,6 +2227,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            cleanup_output_files(_current_settings())
             params = parse_qs(parsed.query)
             mode = params.get("mode", ["all"])[0]
             if mode not in MODES:
@@ -2256,6 +2336,9 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/generate":
             self._generate_report()
             return
+        if parsed.path == "/delete-file":
+            self._delete_file()
+            return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def _save_user_action(self) -> None:
@@ -2339,7 +2422,24 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             self._redirect(self._settings_location(error=f"Не удалось сохранить backend/.env: {exc}"))
             return
         schedule_message = _apply_schedule(values)
-        self._redirect(self._settings_location(message=f"Настройки сохранены. {schedule_message}"))
+        cleanup_message = _apply_cleanup(values)
+        self._redirect(self._settings_location(message=f"Настройки сохранены. {schedule_message} {cleanup_message}"))
+
+    def _delete_file(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8")
+        form = parse_qs(raw)
+        filename = unquote(form.get("file", [""])[0])
+        path = _safe_output_path(filename)
+        if path is None:
+            self._redirect(self._report_location(error="Файл не найден или уже удалён."))
+            return
+        try:
+            path.unlink()
+        except OSError as exc:
+            self._redirect(self._report_location(error=f"Не удалось удалить файл: {exc}"))
+            return
+        self._redirect(self._report_location(message=f"Файл удалён: {path.name}"))
 
     def _generate_report(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -2387,6 +2487,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                     send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
                 if send_email:
                     send_to_email(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+                cleanup_output_files(_current_settings())
         except ODataUnavailableError as exc:
             self._redirect(
                 self._report_location(

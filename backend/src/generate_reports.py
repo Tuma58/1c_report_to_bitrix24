@@ -14,12 +14,14 @@ from pathlib import Path
 
 try:
     from .bitrix_sender import BitrixSender, BitrixError
+    from .cleanup import cleanup_output_files
     from .email_sender import EmailSender, EmailError
     from .excel_reporter import ExcelReporter
     from .metrics import MetricsService
     from .odata_client import ODataError, ODataUnavailableError
 except ImportError:  # запуск как скрипта из backend/src
     from bitrix_sender import BitrixSender, BitrixError
+    from cleanup import cleanup_output_files
     from email_sender import EmailSender, EmailError
     from excel_reporter import ExcelReporter
     from metrics import MetricsService
@@ -199,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
         except EmailError as exc:
             print(f"Ошибка email: {exc}", file=sys.stderr)
             return 5
+
+    deleted = cleanup_output_files()
+    if deleted:
+        print(f"[OK] Автоочистка файлов: удалено {deleted}")
 
     return 0
 

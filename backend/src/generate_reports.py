@@ -40,6 +40,16 @@ class GeneratedReport:
     kind: str
     name: str
     path: Path
+    message: str = ""
+
+
+DAILY_SHEETS = {
+    "Арсенал (Д)",
+    "Реф.сервис (Д)",
+    "Шаркер (Д)",
+    "ЦКР (Д)",
+    "Мойка (Д)",
+}
 
 
 def _parse_date(value: str) -> date:
@@ -98,6 +108,28 @@ def _weekly_start(service: MetricsService, any_date: date) -> date:
     return start
 
 
+def _weekly_range(service: MetricsService, any_date: date) -> tuple[date, date]:
+    start, end = service._week_bounds(any_date)
+    return start, end - timedelta(days=1)
+
+
+def _fmt_date(day: date) -> str:
+    return day.strftime("%d.%m.%Y")
+
+
+def _report_message(mode: str, service: MetricsService, daily_day: date, weekly_day: date) -> str:
+    if mode == "daily":
+        return f"Ежедневный отчёт АТЦ за {_fmt_date(daily_day)}"
+    if mode == "weekly":
+        start, end = _weekly_range(service, weekly_day)
+        return f"Еженедельный отчёт АТЦ за период {_fmt_date(start)}–{_fmt_date(end)}"
+    start, end = _weekly_range(service, weekly_day)
+    return (
+        f"Отчёты АТЦ: ежедневный за {_fmt_date(daily_day)}, "
+        f"еженедельный за период {_fmt_date(start)}–{_fmt_date(end)}"
+    )
+
+
 def _bundle_path(mode: str, service: MetricsService, daily_day: date, weekly_day: date) -> Path:
     if mode == "daily":
         return OUTPUT_DIR / f"reports_daily_{daily_day.isoformat()}.xlsx"
@@ -107,6 +139,14 @@ def _bundle_path(mode: str, service: MetricsService, daily_day: date, weekly_day
         f"reports_all_daily_{daily_day.isoformat()}_"
         f"weekly_{_weekly_start(service, weekly_day).isoformat()}.xlsx"
     )
+
+
+def _prune_workbook_for_mode(wb, mode: str) -> None:
+    if mode != "daily":
+        return
+    for sheet_name in list(wb.sheetnames):
+        if sheet_name not in DAILY_SHEETS:
+            del wb[sheet_name]
 
 
 def generate_workbook(
@@ -122,13 +162,15 @@ def generate_workbook(
     if mode in ("weekly", "all"):
         fill_weekly_sheets(service, reporter, wb, weekly_day)
 
+    _prune_workbook_for_mode(wb, mode)
     out = reporter.save_workbook(wb, _bundle_path(mode, service, daily_day, weekly_day))
-    return [GeneratedReport(mode, "Все отчёты", out)]
+    return [GeneratedReport(mode, "Все отчёты", out, _report_message(mode, service, daily_day, weekly_day))]
 
 
-def send_to_bitrix(reports: list[GeneratedReport], title: str) -> None:
+def send_to_bitrix(reports: list[GeneratedReport], title: str = "") -> None:
     sender = BitrixSender()
-    sender.send_files([r.path for r in reports], title)
+    message = title or (reports[0].message if reports else "Отчёты АТЦ")
+    sender.send_files([r.path for r in reports], message)
 
 
 def send_to_email(reports: list[GeneratedReport], title: str) -> None:
@@ -188,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.send_bitrix:
         try:
-            send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+            send_to_bitrix(generated)
             print("[OK] Отправлено в Bitrix24")
         except BitrixError as exc:
             print(f"Ошибка Bitrix24: {exc}", file=sys.stderr)

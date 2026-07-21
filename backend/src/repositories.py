@@ -26,8 +26,10 @@ except ImportError:  # запуск как скрипта
 GUID_BATCH = 20
 
 
-def _dt(d: date) -> str:
-    """OData-литерал datetime для начала дня d."""
+def _dt(d: date | datetime) -> str:
+    """OData-литерал datetime."""
+    if isinstance(d, datetime):
+        return f"datetime'{d.strftime('%Y-%m-%dT%H:%M:%S')}'"
     return f"datetime'{d.strftime('%Y-%m-%d')}T00:00:00'"
 
 
@@ -382,6 +384,7 @@ class InsuranceRepository:
         self._invoice_cache: dict[tuple[str, date], dict[str, list[dict]]] = {}
         self._delivered_cache: dict[date, set[str]] = {}
         self._balance_cache: dict[date, dict[str, float]] = {}
+        self.selection_end_at: Optional[datetime] = None
 
     def _repair_type_keys(self) -> set[str]:
         if self._repair_keys is not None:
@@ -398,8 +401,9 @@ class InsuranceRepository:
         }
         return self._repair_keys
 
-    @staticmethod
-    def _selection_end(day: date) -> date:
+    def _selection_end(self, day: date) -> date | datetime:
+        if self.selection_end_at is not None:
+            return self.selection_end_at
         return day + timedelta(days=1)
 
     def _closed_insurance_orders(self, division_key: str, as_of: date) -> list[dict]:
@@ -434,7 +438,7 @@ class InsuranceRepository:
         # счет-фактуры подразделения до даты отчета и сопоставляем с ЗН в Python.
         f = (
             f"ПодразделениеКомпании_Key eq guid'{division_key}' "
-            f"and Date lt {_dt(as_of + timedelta(days=1))} "
+            f"and Date lt {_dt(self._selection_end(as_of))} "
             f"and ДокументОснование_Type eq '{self.INVOICE_ORDER_TYPE}'"
         )
         rows = self.client.get(
@@ -464,7 +468,7 @@ class InsuranceRepository:
             f"ДокументСсылка_Type eq '{self.INVOICE_ORIGINAL_TYPE}' "
             "and ОригиналПолучен eq true "
             "and Дата2 gt datetime'1901-01-01T00:00:00' "
-            f"and Дата2 lt {_dt(as_of + timedelta(days=1))}"
+            f"and Дата2 lt {_dt(self._selection_end(as_of))}"
         )
         rows = self.client.get(
             self.ORIGINALS_REGISTER,

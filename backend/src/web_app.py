@@ -2484,7 +2484,7 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                     weekly_day = report_date
                 generated = generate_workbook(service, reporter, mode, daily_day, weekly_day)
                 if send_bitrix:
-                    send_to_bitrix(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
+                    send_to_bitrix(generated)
                 if send_email:
                     send_to_email(generated, "Отчёты АТЦ: Excel-файл с листами отчётов")
                 cleanup_output_files(_current_settings())
